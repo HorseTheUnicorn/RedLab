@@ -1,5 +1,9 @@
 # RedLab
 
+<p align="center">
+  <img src="docs/images/redlab-icon.png" alt="RedLab flask and terminal icon" width="220">
+</p>
+
 RedLab is a deterministic RHEL 8 behavioral emulator for troubleshooting and defensive-security hackathons. Participants operate inside a virtual RHEL-like machine: commands, files, services, users, packages, network state, logs, and time are simulated. RedLab never forwards participant commands to the host shell, maps virtual paths onto the host filesystem, or requires a real RHEL server.
 
 The intended event model is local-first. Every participant can run the emulator on their own computer, complete a scenario, and send the signed submission bundle to the organizer. RedLab also contains an optional organizer backend for events that want coordinated remote sessions; the backend is not required for local play.
