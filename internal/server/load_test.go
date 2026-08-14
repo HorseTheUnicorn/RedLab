@@ -79,14 +79,12 @@ func TestFortyConcurrentInteractiveSessions(t *testing.T) {
 	for err := range errorsCh {
 		t.Fatal(err)
 	}
-	limit := 5 * time.Second
-	if raceEnabled {
-		// The race detector instruments synchronization and makes the deliberately
-		// expensive bcrypt login checks substantially slower.
-		limit = 30 * time.Second
-	}
-	if elapsed := time.Since(started); elapsed > limit {
-		t.Fatalf("40-session interactive burst took %s; target is %s", elapsed, limit)
+	// Keep wall-clock performance assertions out of race builds: race
+	// instrumentation and intentionally expensive bcrypt checks vary heavily
+	// with runner CPU capacity. The same concurrent workload still runs above,
+	// so the race detector continues to inspect it in full.
+	if elapsed := time.Since(started); !raceEnabled && elapsed > 5*time.Second {
+		t.Fatalf("40-session interactive burst took %s; target is 5s", elapsed)
 	}
 	if len(app.Sessions) != 40 {
 		t.Fatalf("sessions = %d, want 40", len(app.Sessions))
