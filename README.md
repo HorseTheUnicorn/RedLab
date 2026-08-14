@@ -4,7 +4,48 @@ RedLab is a deterministic RHEL 8 behavioral emulator for troubleshooting and def
 
 The intended event model is local-first. Every participant can run the emulator on their own computer, complete a scenario, and send the signed submission bundle to the organizer. RedLab also contains an optional organizer backend for events that want coordinated remote sessions; the backend is not required for local play.
 
-## 1. Pull the project locally from GitHub
+## 1. Download a ready-to-run binary (recommended)
+
+Most participants and organizers should download a binary from the [`dist/`](https://github.com/HorseTheUnicorn/RedLab/tree/master/dist) directory. These binaries are self-contained: users do not need Go, CGO, Git, a RHEL installation, or a server to run RedLab locally. Choose the file that matches the operating system and CPU architecture:
+
+| Platform | Download |
+| --- | --- |
+| Windows x64 | [redlab-windows-amd64.exe](https://github.com/HorseTheUnicorn/RedLab/raw/refs/heads/master/dist/redlab-windows-amd64.exe) |
+| Linux x64 | [redlab-linux-amd64](https://github.com/HorseTheUnicorn/RedLab/raw/refs/heads/master/dist/redlab-linux-amd64) |
+| Linux ARM64 | [redlab-linux-arm64](https://github.com/HorseTheUnicorn/RedLab/raw/refs/heads/master/dist/redlab-linux-arm64) |
+| macOS Intel | [redlab-darwin-amd64](https://github.com/HorseTheUnicorn/RedLab/raw/refs/heads/master/dist/redlab-darwin-amd64) |
+| macOS Apple Silicon | [redlab-darwin-arm64](https://github.com/HorseTheUnicorn/RedLab/raw/refs/heads/master/dist/redlab-darwin-arm64) |
+
+The matching SHA-256 values are in [`dist/SHA256SUMS.txt`](dist/SHA256SUMS.txt). After downloading, run the executable directly. For macOS and Linux, make it executable first:
+
+```powershell
+.\redlab-windows-amd64.exe version
+.\redlab-windows-amd64.exe play broken-httpd
+```
+
+```bash
+chmod +x ./redlab-darwin-arm64   # use the file you downloaded
+./redlab-darwin-arm64 version
+./redlab-darwin-arm64 play broken-httpd
+```
+
+The first-party scenario packs are embedded in every binary, so participants can start a built-in scenario without cloning the repository or downloading any additional package.
+
+## Screenshots
+
+The organizer panel is served by the local RedLab process and has no external web-service dependency. These captures show the year-2000-style control panel, its scenario workshop, and the participant link-token controls. The token is intentionally hidden in the documentation capture; the real token is displayed once when it is generated or rotated.
+
+![RedLab organizer dashboard overview](docs/images/dashboard-overview.jpg)
+
+![RedLab scenario workshop](docs/images/dashboard-scenario-workshop.jpg)
+
+![RedLab participant link-token controls](docs/images/dashboard-link-token.jpg)
+
+Participants use the local console client rather than a host shell. Their commands run inside RedLab's bounded virtual RHEL environment:
+
+![RedLab participant terminal](docs/images/participant-terminal.jpg)
+
+## 2. Pull the source locally from GitHub (optional)
 
 Install Git, then clone the repository:
 
@@ -20,11 +61,11 @@ cd RedLab
 git pull --ff-only origin master
 ```
 
-The same Git commands work in Bash, macOS Terminal, and Linux shells. Run all `go run` and `go build` commands from the repository root, the directory containing `go.mod`.
+The same Git commands work in Bash, macOS Terminal, and Linux shells. This source checkout is only needed for development, scenario authoring from source, or contributing changes.
 
-## 2. Prerequisites
+## 3. Prerequisites for source builds
 
-Required on every participant and organizer computer:
+Required only when compiling from source:
 
 - Git 2.30 or newer.
 - Go 1.26 or newer. The required version is declared in [`go.mod`](go.mod).
@@ -37,7 +78,7 @@ Not required:
 - A shared application server.
 - Root or administrator privileges on the participant computer.
 
-The first dependency download needs internet access. After Go has downloaded the module dependencies, local practice and bundle creation do not need a network connection.
+Binary users can skip this section. For source builds, the first dependency download needs internet access; after Go has downloaded the module dependencies, local practice and bundle creation do not need a network connection.
 
 Check the installation:
 
@@ -46,7 +87,11 @@ git --version
 go version
 ```
 
-## 3. Download dependencies and build RedLab
+## 4. Optional: compile RedLab yourself
+
+This is the development and contributor path. Normal participants should use the ready-to-run binary from section 1.
+
+The command examples in the rest of this document use `go run ./cmd/redlab` so they work from a source checkout. If you are using a downloaded binary, replace that prefix with the name of your executable, such as `.\redlab-windows-amd64.exe` on Windows or `./redlab-linux-amd64` on Linux.
 
 From the repository root:
 
@@ -82,7 +127,7 @@ The first-party scenario packs are embedded in the binary. After building it, a 
 
 Use a directory or `.rlab` archive when you are authoring or importing a custom package.
 
-## 4. Verify a checkout
+## 5. Verify a checkout
 
 Run the normal repository checks before an event:
 
@@ -128,7 +173,7 @@ go test -race ./...
 
 If Go reports `-race requires cgo`, enable CGO and install a platform C toolchain, or use the regular test and vet commands above.
 
-## 5. Run a local participant session
+## 6. Run a local participant session
 
 This is the recommended workflow for a distributed hackathon. No server is needed.
 
@@ -181,7 +226,7 @@ Useful lab commands:
 
 Every path in that terminal is virtual. For example, writing `/etc/httpd/conf/httpd.conf` changes only the scenario state held by RedLab; it does not change the participant's real computer.
 
-## 6. Verify and send a submission bundle
+## 7. Verify and send a submission bundle
 
 After leaving a session, verify the bundle before sending it to the organizer:
 
@@ -199,7 +244,7 @@ go run ./cmd/redlab evidence verify .\TEAM-1-submission.rlab.zip
 go run ./cmd/redlab judge .\TEAM-1-submission.rlab.zip
 ```
 
-## 7. Core scenario catalog
+## 8. Core scenario catalog
 
 All core scenarios are deterministic, resettable, replayable, and safe to run locally. Product names describe the virtual packages and services represented by the scenario; they are not installed on the host computer.
 
@@ -218,7 +263,7 @@ All core scenarios are deterministic, resettable, replayable, and safe to run lo
 
 Use `--team TEAM-1 --export ./submission.rlab.zip` with any scenario when you want to identify the team and create a submission bundle.
 
-## 8. Organizer setup for a local-only event
+## 9. Organizer setup for a local-only event
 
 For the stated remote-team model, the simplest arrangement is for every team member to clone the same commit, run `play` locally, and send the resulting bundle to the organizer. The organizer does not need to install RedLab as a server.
 
@@ -269,21 +314,7 @@ For a serverless event, collect bundles from the teams and review them with `evi
 
 When the organizer wants a browser control panel, start `serve` and open `http://127.0.0.1:8443/` (or the configured address). The panel uses the organizer recovery secret to log on and provides event close/reopen controls, live session and submission review, judging, submission export, scenario package management, and link-token rotation. It has no external JavaScript or CDN dependency.
 
-### Screenshots
-
-The organizer panel is served by the local RedLab process and has no external web-service dependency. These captures show the year-2000-style control panel, its scenario workshop, and the participant link-token controls. The token is intentionally hidden in the documentation capture; the real token is displayed once when it is generated or rotated.
-
-![RedLab organizer dashboard overview](docs/images/dashboard-overview.jpg)
-
-![RedLab scenario workshop](docs/images/dashboard-scenario-workshop.jpg)
-
-![RedLab participant link-token controls](docs/images/dashboard-link-token.jpg)
-
-Participants use the local console client rather than a host shell. Their commands run inside RedLab's bounded virtual RHEL environment:
-
-![RedLab participant terminal](docs/images/participant-terminal.jpg)
-
-## 9. Optional coordinated remote mode
+## 10. Optional coordinated remote mode
 
 Remote mode is optional. It is useful when the organizer wants session assignment, live session state, and server-side collection, but it is not needed when all participants run locally and exchange bundles.
 
@@ -309,7 +340,7 @@ go run ./cmd/redlab join https://ORGANIZER-HOST:8443 --team HACK-1 --join-code T
 
 The participant still works in the same bounded virtual terminal. In remote mode, submissions are stored under the event's configured data directory. Never disable TLS just to make a LAN connection work; use the generated certificate or provide an organizer-managed certificate and key in `event.yaml`.
 
-## 10. Command reference
+## 11. Command reference
 
 Run `go run ./cmd/redlab --help` or `go run ./cmd/redlab <command> --help` for flags. The top-level commands are:
 
@@ -337,7 +368,7 @@ Run `go run ./cmd/redlab --help` or `go run ./cmd/redlab <command> --help` for f
 
 The command catalog is deliberately bounded and versioned. A recognized command that is outside the implemented scenario depth returns an explicit unsupported result; it never falls back to the organizer's operating system.
 
-## 11. Author or add a scenario
+## 12. Author or add a scenario
 
 Create a new scenario entirely with the binary. This creates strict YAML plus an editable fixture directory; no Go source change or recompilation is required:
 
@@ -374,7 +405,7 @@ The built-in product packs show how to model application incidents without insta
 
 Use [`docs/authoring.md`](docs/authoring.md) for the complete schema and authoring boundary.
 
-## 12. Safety and compatibility boundary
+## 13. Safety and compatibility boundary
 
 RedLab is designed to be safe for an untrusted participant command stream:
 
@@ -387,7 +418,7 @@ RedLab is designed to be safe for an untrusted participant command stream:
 
 The emulator is not a full Bash or RHEL implementation. Run `catalog commands` to see the current compatibility level. Level A behavior is scenario-grade, Level B is common inspection, and Level C is recognized but intentionally unsupported at depth. Do not use RedLab as a general-purpose shell or as a replacement for production infrastructure.
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 `go` or `git` is not recognized: install Git and Go, restart the terminal, and confirm `git --version` and `go version` work.
 
@@ -403,7 +434,7 @@ Remote join fails with a certificate error: use the exact HTTPS URL and the fing
 
 The race test cannot start on Windows: install and enable a CGO-capable compiler, or run the regular `go test ./...` and `go vet ./...` checks.
 
-## 14. Further documentation
+## 15. Further documentation
 
 - [`docs/participant-quickstart.md`](docs/participant-quickstart.md) — short participant instructions.
 - [`docs/operations.md`](docs/operations.md) — event-day operations and bundle review.

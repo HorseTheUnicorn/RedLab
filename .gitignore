@@ -9,3 +9,7 @@
 *.test
 *.out
 .DS_Store
+
+# User-facing release binaries are intentionally versioned.
+!/dist/
+!/dist/**
