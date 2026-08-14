@@ -269,6 +269,20 @@ For a serverless event, collect bundles from the teams and review them with `evi
 
 When the organizer wants a browser control panel, start `serve` and open `http://127.0.0.1:8443/` (or the configured address). The panel uses the organizer recovery secret to log on and provides event close/reopen controls, live session and submission review, judging, submission export, scenario package management, and link-token rotation. It has no external JavaScript or CDN dependency.
 
+### Screenshots
+
+The organizer panel is served by the local RedLab process and has no external web-service dependency. These captures show the year-2000-style control panel, its scenario workshop, and the participant link-token controls. The token is intentionally hidden in the documentation capture; the real token is displayed once when it is generated or rotated.
+
+![RedLab organizer dashboard overview](docs/images/dashboard-overview.jpg)
+
+![RedLab scenario workshop](docs/images/dashboard-scenario-workshop.jpg)
+
+![RedLab participant link-token controls](docs/images/dashboard-link-token.jpg)
+
+Participants use the local console client rather than a host shell. Their commands run inside RedLab's bounded virtual RHEL environment:
+
+![RedLab participant terminal](docs/images/participant-terminal.jpg)
+
 ## 9. Optional coordinated remote mode
 
 Remote mode is optional. It is useful when the organizer wants session assignment, live session state, and server-side collection, but it is not needed when all participants run locally and exchange bundles.
