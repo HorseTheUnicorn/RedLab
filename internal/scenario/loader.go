@@ -174,9 +174,12 @@ func loadArchive(filename string) (Package, []Diagnostic) {
 			return Package{}, []Diagnostic{{Filename: filename, Message: err.Error()}}
 		}
 		data, err := io.ReadAll(io.LimitReader(stream, maxPackageBytes+1))
-		stream.Close()
+		closeErr := stream.Close()
 		if err != nil {
 			return Package{}, []Diagnostic{{Filename: filename, Message: err.Error()}}
+		}
+		if closeErr != nil {
+			return Package{}, []Diagnostic{{Filename: filename, Message: closeErr.Error()}}
 		}
 		if len(data) > maxPackageBytes {
 			return Package{}, []Diagnostic{{Filename: filename, Message: "scenario archive entry exceeds the size limit"}}
@@ -399,7 +402,7 @@ func ValidateEvent(e Event, filename string) []Diagnostic {
 
 func safePackagePath(name string) (string, error) {
 	name = strings.ReplaceAll(name, "\\", "/")
-	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, ":") {
+	if name == "" || len(name) > 4096 || strings.ContainsRune(name, '\x00') || strings.HasPrefix(name, "/") || strings.Contains(name, ":") {
 		return "", fmt.Errorf("unsafe package path: %q", name)
 	}
 	clean := filepath.ToSlash(filepath.Clean(name))
@@ -422,6 +425,7 @@ func safeVirtualPath(name string) (string, error) {
 }
 
 func readLimited(filename string, limit int64) ([]byte, error) {
+	// #nosec G304 -- this CLI boundary intentionally opens the organizer-supplied scenario or event path.
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err

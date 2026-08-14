@@ -43,6 +43,7 @@ type Session struct {
 	JudgeScore      int
 	JudgeNotes      string
 	Judged          bool
+	secrets         []string
 	EventPublicKey  ed25519.PublicKey
 	EventPrivateKey ed25519.PrivateKey
 }
@@ -60,7 +61,13 @@ func NewSession(id, team string, pkg scenario.Package, seed time.Time) (*Session
 	}
 	registry := command.NewRegistry()
 	command.RegisterCore(registry)
-	session := &Session{ID: id, TeamID: team, Package: pkg, Scenario: pkg.Scenario, State: state, Registry: registry, Rules: rules.New(pkg.Scenario.Spec.Rules), Hints: map[string]bool{}, Started: seed, EventPublicKey: publicKey, EventPrivateKey: privateKey}
+	secrets := make([]string, 0, len(pkg.Scenario.Spec.Actors.Users))
+	for _, user := range pkg.Scenario.Spec.Actors.Users {
+		if user.Password != "" {
+			secrets = append(secrets, user.Password)
+		}
+	}
+	session := &Session{ID: id, TeamID: team, Package: pkg, Scenario: pkg.Scenario, State: state, Registry: registry, Rules: rules.New(pkg.Scenario.Spec.Rules), Hints: map[string]bool{}, Started: seed, secrets: secrets, EventPublicKey: publicKey, EventPrivateKey: privateKey}
 	return session, nil
 }
 
@@ -229,8 +236,11 @@ func (s *Session) runPipeline(env *command.Env, pipeline shell.Pipeline) command
 
 func (s *Session) record(input string, result command.Result) command.Result {
 	now := s.State.CurrentTime()
-	s.Chain.Append(evidence.Event{SessionID: s.ID, VirtualTimestamp: now, Timestamp: now, Type: "command", Actor: s.State.CurrentUser, Command: evidence.Redact(input, nil), ExitCode: result.ExitCode, Mutations: append([]string(nil), result.Mutations...)})
-	entry := fmt.Sprintf("$ %s\n%s%s", input, result.Stdout, result.Stderr)
+	redactedInput := evidence.Redact(input, s.secrets)
+	redactedStdout := evidence.Redact(result.Stdout, s.secrets)
+	redactedStderr := evidence.Redact(result.Stderr, s.secrets)
+	s.Chain.Append(evidence.Event{SessionID: s.ID, VirtualTimestamp: now, Timestamp: now, Type: "command", Actor: s.State.CurrentUser, Command: input, ExitCode: result.ExitCode, Mutations: append([]string(nil), result.Mutations...)})
+	entry := fmt.Sprintf("$ %s\n%s%s", redactedInput, redactedStdout, redactedStderr)
 	if s.Transcript.Len() < maxTranscriptBytes {
 		remaining := maxTranscriptBytes - s.Transcript.Len()
 		if len(entry) > remaining {
@@ -349,7 +359,27 @@ func (s *Session) reportLocked(eventID string) report.Model {
 		}
 		rubrics = append(rubrics, report.Rubric{ID: rubric.ID, Maximum: rubric.Maximum, Criteria: criteria})
 	}
-	return report.Model{EventID: eventID, ScenarioID: s.Scenario.Metadata.ID, TeamID: s.TeamID, SessionID: s.ID, SubmissionID: "submission-" + s.ID, ScenarioDigest: s.Package.Digest, BuildVersion: version.Build, SchemaVersion: version.Schema, StartedAt: s.Started, SubmittedAt: submittedAt, ElapsedSeconds: int64(elapsed / time.Second), VirtualTime: current, Score: score, JudgeScore: s.JudgeScore, JudgeMaximum: s.Scenario.Spec.Scoring.JudgeMaximum, JudgeNotes: s.JudgeNotes, Judged: s.Judged, TotalScore: score.Automated + s.JudgeScore, TotalMaximum: score.Maximum + s.Scenario.Spec.Scoring.JudgeMaximum, Passing: score.Automated+s.JudgeScore >= s.Scenario.Spec.Scoring.MinimumPassingScore, RootCause: s.RootCause, Resolution: s.Resolution, Notes: append([]string(nil), s.Notes...), Hints: hints, Rubrics: rubrics, StateDiff: report.Diff(s.State.Initial, s.State), Timeline: report.SortedTimeline(s.Chain.Snapshot()), Transcript: s.Transcript.String(), EvidenceVerified: s.Chain.Verify() == nil}
+	return report.Model{EventID: eventID, ScenarioID: s.Scenario.Metadata.ID, TeamID: s.TeamID, SessionID: s.ID, SubmissionID: "submission-" + s.ID, ScenarioDigest: s.Package.Digest, BuildVersion: version.Build, SchemaVersion: version.Schema, StartedAt: s.Started, SubmittedAt: submittedAt, ElapsedSeconds: int64(elapsed / time.Second), VirtualTime: current, Score: score, JudgeScore: s.JudgeScore, JudgeMaximum: s.Scenario.Spec.Scoring.JudgeMaximum, JudgeNotes: s.JudgeNotes, Judged: s.Judged, TotalScore: score.Automated + s.JudgeScore, TotalMaximum: score.Maximum + s.Scenario.Spec.Scoring.JudgeMaximum, Passing: score.Automated+s.JudgeScore >= s.Scenario.Spec.Scoring.MinimumPassingScore, RootCause: s.RootCause, Resolution: s.Resolution, Notes: append([]string(nil), s.Notes...), Hints: hints, Rubrics: rubrics, StateDiff: report.Diff(s.State.Initial, s.State), Timeline: report.SortedTimeline(s.redactedEventsLocked()), Transcript: s.Transcript.String(), EvidenceVerified: s.Chain.Verify() == nil}
+}
+
+func (s *Session) redactedEventsLocked() []evidence.Event {
+	redacted := evidence.Chain{}
+	for _, event := range s.Chain.Snapshot() {
+		event.Command = evidence.Redact(event.Command, s.secrets)
+		event.PreviousHash = ""
+		event.Hash = ""
+		redacted.Append(event)
+	}
+	return redacted.Snapshot()
+}
+
+// PersistenceEvents returns the unredacted event stream used only for local
+// crash recovery. User-facing reports and exported bundles use a redacted,
+// independently verified chain.
+func (s *Session) PersistenceEvents() []evidence.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Chain.Snapshot()
 }
 func (s *Session) TranscriptText() string {
 	s.mu.Lock()
@@ -366,7 +396,7 @@ func (s *Session) ExportBundle(filename, eventID string) error {
 	defer s.mu.Unlock()
 	model := s.reportLocked(eventID)
 	manifest := evidence.Manifest{EventID: eventID, ScenarioID: s.Scenario.Metadata.ID, TeamID: s.TeamID, SessionID: s.ID, ScenarioDigest: s.Package.Digest}
-	return bundle.Write(filename, bundle.Input{Report: model, Scenario: s.Scenario, Events: s.Chain.Snapshot(), Manifest: manifest, PrivateKey: s.EventPrivateKey})
+	return bundle.Write(filename, bundle.Input{Report: model, Scenario: s.Scenario, Events: s.redactedEventsLocked(), Manifest: manifest, PrivateKey: s.EventPrivateKey})
 }
 
 func expand(word string, env *command.Env) string {

@@ -78,8 +78,8 @@ func newStatusCommand() *cobra.Command {
 		if response.StatusCode != http.StatusOK {
 			return fmt.Errorf("server health: %s", response.Status)
 		}
-		io.Copy(os.Stdout, response.Body)
-		return nil
+		_, err = io.Copy(os.Stdout, response.Body)
+		return err
 	}}
 	status.Flags().StringVar(&address, "url", "", "server URL")
 	return status
@@ -123,7 +123,7 @@ func submissionFiles(directory string) ([]os.DirEntry, error) {
 	}
 	files := make([]os.DirEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".rlab.zip") {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".rlab.zip") {
 			continue
 		}
 		files = append(files, entry)
@@ -161,24 +161,66 @@ func exportSubmissions(source, destination string) error {
 	if err := os.MkdirAll(destination, 0700); err != nil {
 		return err
 	}
+	sourceRoot, err := os.OpenRoot(source)
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
+	destinationRoot, err := os.OpenRoot(destination)
+	if err != nil {
+		return err
+	}
+	defer destinationRoot.Close()
 	exported := 0
 	for _, file := range files {
-		input := filepath.Join(source, file.Name())
-		if _, err := bundle.Verify(input); err != nil {
-			return fmt.Errorf("verify %s: %w", input, err)
-		}
-		data, err := os.ReadFile(input)
+		input, err := sourceRoot.Open(file.Name())
 		if err != nil {
 			return err
 		}
-		output := filepath.Join(destination, file.Name())
-		if _, err := os.Stat(output); err == nil {
-			return fmt.Errorf("refusing to overwrite existing export: %s", output)
-		} else if !os.IsNotExist(err) {
+		info, err := input.Stat()
+		if err != nil {
+			_ = input.Close()
 			return err
 		}
-		if err := os.WriteFile(output, data, 0600); err != nil {
+		if !info.Mode().IsRegular() {
+			_ = input.Close()
+			return fmt.Errorf("submission is not a regular file: %s", file.Name())
+		}
+		if _, err := bundle.VerifyReader(input, info.Size()); err != nil {
+			_ = input.Close()
+			return fmt.Errorf("verify %s: %w", file.Name(), err)
+		}
+		if _, err := input.Seek(0, io.SeekStart); err != nil {
+			_ = input.Close()
 			return err
+		}
+		output, err := destinationRoot.OpenFile(file.Name(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			_ = input.Close()
+			if os.IsExist(err) {
+				return fmt.Errorf("refusing to overwrite existing export: %s", filepath.Join(destination, file.Name()))
+			}
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		inputErr := input.Close()
+		syncErr := output.Sync()
+		outputErr := output.Close()
+		if copyErr != nil {
+			_ = destinationRoot.Remove(file.Name())
+			return copyErr
+		}
+		if inputErr != nil {
+			_ = destinationRoot.Remove(file.Name())
+			return inputErr
+		}
+		if syncErr != nil {
+			_ = destinationRoot.Remove(file.Name())
+			return syncErr
+		}
+		if outputErr != nil {
+			_ = destinationRoot.Remove(file.Name())
+			return outputErr
 		}
 		exported++
 	}
@@ -845,7 +887,10 @@ func newServeCommand() *cobra.Command {
 			address = "127.0.0.1:8443"
 		}
 		if !lan {
-			address = loopbackAddress(address)
+			address, err = loopbackAddress(address)
+			if err != nil {
+				return err
+			}
 		} else if event.Spec.Server.TLS.Mode == "disabled" {
 			return errors.New("LAN mode requires TLS; configure generated or provided TLS")
 		}
@@ -915,7 +960,10 @@ func newJoinCommand() *cobra.Command {
 	var teamID, joinCode, linkToken string
 	var trustFingerprint string
 	join := &cobra.Command{Use: "join <server-url>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
-		base := strings.TrimRight(args[0], "/")
+		base, err := normalizeServerURL(args[0])
+		if err != nil {
+			return err
+		}
 		if teamID == "" || joinCode == "" {
 			return errors.New("--team and --join-code are required")
 		}
@@ -978,24 +1026,72 @@ func newJoinCommand() *cobra.Command {
 }
 
 func joinHTTPClient(base, fingerprint string) (*http.Client, *tls.Config, error) {
-	if !strings.HasPrefix(base, "https://") {
-		return http.DefaultClient, nil, nil
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Hostname() == "" {
+		return nil, nil, errors.New("invalid server URL")
+	}
+	if parsed.Scheme == "http" {
+		if !isLoopbackHost(parsed.Hostname()) {
+			return nil, nil, errors.New("refusing to send credentials over non-loopback HTTP; use HTTPS")
+		}
+		return &http.Client{Timeout: 30 * time.Second}, nil, nil
+	}
+	if parsed.Scheme != "https" {
+		return nil, nil, errors.New("server URL must use http or https")
 	}
 	if fingerprint == "" {
 		return &http.Client{Timeout: 30 * time.Second}, nil, nil
 	}
 	expected := strings.ReplaceAll(strings.ToLower(fingerprint), ":", "")
-	config := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, VerifyConnection: func(state tls.ConnectionState) error {
-		if len(state.PeerCertificates) == 0 {
-			return errors.New("server did not present a certificate")
-		}
-		sum := sha256.Sum256(state.PeerCertificates[0].Raw)
-		if hex.EncodeToString(sum[:]) != expected {
-			return errors.New("server certificate fingerprint mismatch")
-		}
-		return nil
-	}}
+	if len(expected) != sha256.Size*2 {
+		return nil, nil, errors.New("server certificate fingerprint must be a SHA-256 value")
+	}
+	if _, err := hex.DecodeString(expected); err != nil {
+		return nil, nil, errors.New("server certificate fingerprint is not valid hexadecimal")
+	}
+	config := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, // #nosec G402 -- the exact certificate is authenticated by the SHA-256 pin below.
+		VerifyConnection: func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return errors.New("server did not present a certificate")
+			}
+			certificate := state.PeerCertificates[0]
+			now := time.Now()
+			if now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
+				return errors.New("server certificate is not currently valid")
+			}
+			sum := sha256.Sum256(certificate.Raw)
+			if hex.EncodeToString(sum[:]) != expected {
+				return errors.New("server certificate fingerprint mismatch")
+			}
+			return nil
+		}}
 	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: config}}, config, nil
+}
+
+func normalizeServerURL(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Hostname() == "" || parsed.Host == "" {
+		return "", errors.New("server URL must include a host")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("server URL must use http or https")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", errors.New("server URL must not contain credentials, a path, a query, or a fragment")
+	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return "", errors.New("refusing to send credentials over non-loopback HTTP; use HTTPS")
+	}
+	parsed.Path = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func joinLoop(in io.Reader, out io.Writer, connection *websocket.Conn) error {
@@ -1013,8 +1109,14 @@ func joinLoop(in io.Reader, out io.Writer, connection *websocket.Conn) error {
 				done <- err
 				return
 			}
-			io.WriteString(out, message.Stdout)
-			io.WriteString(out, message.Stderr)
+			if _, err := io.WriteString(out, message.Stdout); err != nil {
+				done <- err
+				return
+			}
+			if _, err := io.WriteString(out, message.Stderr); err != nil {
+				done <- err
+				return
+			}
 		}
 	}()
 	for scanner.Scan() {
@@ -1032,15 +1134,15 @@ func joinLoop(in io.Reader, out io.Writer, connection *websocket.Conn) error {
 	return <-done
 }
 
-func loopbackAddress(address string) string {
-	host, port, err := net.SplitHostPort(address)
+func loopbackAddress(address string) (string, error) {
+	_, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return address
+		return "", fmt.Errorf("invalid listen address %q: %w", address, err)
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" || host == "::0" {
-		host = "127.0.0.1"
+	if port == "" {
+		return "", errors.New("listen address must include a port")
 	}
-	return net.JoinHostPort(host, port)
+	return net.JoinHostPort("127.0.0.1", port), nil
 }
 func playLoop(in io.Reader, out io.Writer, session *runtime.Session) error {
 	scanner := bufio.NewScanner(in)
@@ -1055,8 +1157,12 @@ func playLoop(in io.Reader, out io.Writer, session *runtime.Session) error {
 			return nil
 		}
 		result := session.RunLine(line)
-		io.WriteString(out, result.Stdout)
-		io.WriteString(out, result.Stderr)
+		if _, err := io.WriteString(out, result.Stdout); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(out, result.Stderr); err != nil {
+			return err
+		}
 	}
 }
 func printDiagnostics(diagnostics []scenario.Diagnostic) error {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -36,5 +37,26 @@ func TestEnsureCertificate(t *testing.T) {
 	}
 	if cert2 != cert || key2 != key || fingerprint2 != fingerprint {
 		t.Fatal("certificate was not reused")
+	}
+}
+
+func TestEnsureCertificateReplacesMalformedPair(t *testing.T) {
+	directory := t.TempDir()
+	cert, _, _, err := EnsureCertificate(directory, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cert, []byte("not a certificate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cert, key, fingerprint, err := EnsureCertificate(directory, "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint == "" {
+		t.Fatal("malformed certificate was reused")
+	}
+	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+		t.Fatalf("replacement certificate pair is invalid: %v", err)
 	}
 }

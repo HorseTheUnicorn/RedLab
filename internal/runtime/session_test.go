@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,35 @@ func TestReplayReproducesState(t *testing.T) {
 	right, _ := replayed.State.SnapshotJSON()
 	if !bytes.Equal(left, right) {
 		t.Fatalf("replayed state differs\noriginal=%s\nreplayed=%s", left, right)
+	}
+}
+
+func TestScenarioPasswordsAreRedactedFromEvidenceAndTranscript(t *testing.T) {
+	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "redaction", Title: "Redaction"}, Spec: scenario.ScenarioSpec{
+		RHEL:   scenario.RHELSpec{Major: 8, Hostname: "redaction.example", SELinux: "enforcing"},
+		Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000, Password: "super-secret-password", Shell: "/bin/bash"}}},
+	}}}
+	session, err := NewSession("redaction", "TEAM", pkg, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := session.RunLine("printf super-secret-password")
+	if !strings.Contains(result.Stdout, "super-secret-password") {
+		t.Fatalf("interactive command result unexpectedly changed: %#v", result)
+	}
+	if strings.Contains(session.TranscriptText(), "super-secret-password") {
+		t.Fatal("scenario password leaked into transcript")
+	}
+	events := session.Report("event").Timeline
+	if len(events) != 1 || strings.Contains(events[0].Command, "super-secret-password") {
+		t.Fatalf("scenario password leaked into evidence: %#v", events)
+	}
+	replayed, err := Replay("redaction", "TEAM", pkg, session.PersistenceEvents())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := replayed.State.CurrentTime(); !got.Equal(session.State.CurrentTime()) {
+		t.Fatalf("secret-bearing command did not replay: got %s want %s", got, session.State.CurrentTime())
 	}
 }
 

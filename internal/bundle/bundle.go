@@ -11,12 +11,20 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/redlab/redlab/internal/evidence"
 	"github.com/redlab/redlab/internal/report"
 	"github.com/redlab/redlab/internal/scenario"
+)
+
+const (
+	maxBundleEntryBytes = 64 << 20
+	maxBundleTotalBytes = 256 << 20
+	maxBundleFileBytes  = 512 << 20
+	maxBundleEntries    = 64
 )
 
 type Input struct {
@@ -52,11 +60,20 @@ func Write(filename string, input Input) error {
 	}
 	files["manifest.json"] = mustJSON(input.Manifest)
 	files["manifest.sig"] = mustJSON(signature)
-	file, err := os.Create(filename)
+	directory := filepath.Dir(filename)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(directory, ".submission-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	temporaryName := file.Name()
+	defer os.Remove(temporaryName)
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return err
+	}
 	writer := zip.NewWriter(file)
 	names := make([]string, 0, len(files))
 	for name := range files {
@@ -66,55 +83,104 @@ func Write(filename string, input Input) error {
 	for _, name := range names {
 		entry, err := writer.Create(name)
 		if err != nil {
+			_ = writer.Close()
+			_ = file.Close()
 			return err
 		}
 		if _, err := entry.Write(files[name]); err != nil {
+			_ = writer.Close()
+			_ = file.Close()
 			return err
 		}
 	}
-	return writer.Close()
+	if err := writer.Close(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, filename); err != nil {
+		return err
+	}
+	return os.Chmod(filename, 0600)
 }
 
 func Verify(filename string) (evidence.Manifest, error) {
-	reader, err := zip.OpenReader(filename)
+	// #nosec G304 -- this CLI boundary intentionally opens the organizer-selected bundle path.
+	file, err := os.Open(filename)
 	if err != nil {
 		return evidence.Manifest{}, err
 	}
-	defer reader.Close()
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return evidence.Manifest{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return evidence.Manifest{}, errors.New("bundle must be a regular file")
+	}
+	return VerifyReader(file, info.Size())
+}
+
+// VerifyReader verifies a bundle already opened through a caller-controlled
+// filesystem boundary such as os.Root.
+func VerifyReader(readerAt io.ReaderAt, size int64) (evidence.Manifest, error) {
+	if size < 0 || size > maxBundleFileBytes {
+		return evidence.Manifest{}, errors.New("bundle file exceeds the 512 MiB limit")
+	}
+	reader, err := zip.NewReader(readerAt, size)
+	if err != nil {
+		return evidence.Manifest{}, err
+	}
 	files := map[string][]byte{}
 	seen := map[string]bool{}
 	var total int64
-	for _, entry := range reader.File {
-		if entry.FileInfo().IsDir() {
-			continue
+	for index, entry := range reader.File {
+		if index >= maxBundleEntries {
+			return evidence.Manifest{}, fmt.Errorf("bundle contains more than %d entries", maxBundleEntries)
 		}
-		if err := safeName(entry.Name); err != nil {
+		if entry.FileInfo().IsDir() {
+			return evidence.Manifest{}, fmt.Errorf("directory bundle entry %q is not allowed", entry.Name)
+		}
+		name, err := safeName(entry.Name)
+		if err != nil {
 			return evidence.Manifest{}, err
 		}
-		if seen[entry.Name] {
-			return evidence.Manifest{}, fmt.Errorf("duplicate bundle entry %q", entry.Name)
+		if seen[name] {
+			return evidence.Manifest{}, fmt.Errorf("duplicate bundle entry %q", name)
 		}
-		seen[entry.Name] = true
+		seen[name] = true
 		if entry.FileInfo().Mode()&os.ModeSymlink != 0 {
-			return evidence.Manifest{}, fmt.Errorf("symlink bundle entry %q is not allowed", entry.Name)
+			return evidence.Manifest{}, fmt.Errorf("symlink bundle entry %q is not allowed", name)
 		}
-		if entry.UncompressedSize64 > 64<<20 {
-			return evidence.Manifest{}, fmt.Errorf("bundle entry %q exceeds the 64 MiB limit", entry.Name)
+		if entry.UncompressedSize64 > maxBundleEntryBytes {
+			return evidence.Manifest{}, fmt.Errorf("bundle entry %q exceeds the 64 MiB limit", name)
 		}
 		stream, err := entry.Open()
 		if err != nil {
 			return evidence.Manifest{}, err
 		}
-		data, err := io.ReadAll(io.LimitReader(stream, 64<<20))
-		stream.Close()
+		data, err := io.ReadAll(io.LimitReader(stream, maxBundleEntryBytes+1))
+		closeErr := stream.Close()
 		if err != nil {
 			return evidence.Manifest{}, err
 		}
+		if closeErr != nil {
+			return evidence.Manifest{}, closeErr
+		}
+		if len(data) > maxBundleEntryBytes {
+			return evidence.Manifest{}, fmt.Errorf("bundle entry %q exceeds the 64 MiB limit", name)
+		}
 		total += int64(len(data))
-		if total > 256<<20 {
+		if total > maxBundleTotalBytes {
 			return evidence.Manifest{}, errors.New("bundle exceeds total size limit")
 		}
-		files[entry.Name] = data
+		files[name] = data
 	}
 	var manifest evidence.Manifest
 	if err := json.Unmarshal(files["manifest.json"], &manifest); err != nil {
@@ -127,7 +193,18 @@ func Verify(filename string) (evidence.Manifest, error) {
 	if err := evidence.VerifyManifest(manifest, signature); err != nil {
 		return evidence.Manifest{}, err
 	}
+	allowed := map[string]bool{"manifest.json": true, "manifest.sig": true}
 	for name, expected := range manifest.Files {
+		canonical, err := safeName(name)
+		if err != nil || canonical != name || name == "manifest.json" || name == "manifest.sig" {
+			return evidence.Manifest{}, fmt.Errorf("manifest contains invalid file name %q", name)
+		}
+		if len(expected) != sha256.Size*2 {
+			return evidence.Manifest{}, fmt.Errorf("manifest contains invalid hash for %s", name)
+		}
+		if _, err := hex.DecodeString(expected); err != nil {
+			return evidence.Manifest{}, fmt.Errorf("manifest contains invalid hash for %s", name)
+		}
 		data, ok := files[name]
 		if !ok {
 			return evidence.Manifest{}, fmt.Errorf("bundle is missing %s", name)
@@ -135,6 +212,12 @@ func Verify(filename string) (evidence.Manifest, error) {
 		sum := sha256.Sum256(data)
 		if hex.EncodeToString(sum[:]) != expected {
 			return evidence.Manifest{}, fmt.Errorf("bundle hash mismatch for %s", name)
+		}
+		allowed[name] = true
+	}
+	for name := range files {
+		if !allowed[name] {
+			return evidence.Manifest{}, fmt.Errorf("bundle contains unsigned entry %q", name)
 		}
 	}
 	return manifest, nil
@@ -157,10 +240,16 @@ func ReadReport(filename string) (report.Model, error) {
 		if err != nil {
 			return report.Model{}, err
 		}
-		data, err := io.ReadAll(io.LimitReader(stream, 64<<20))
-		stream.Close()
+		data, err := io.ReadAll(io.LimitReader(stream, maxBundleEntryBytes+1))
+		closeErr := stream.Close()
 		if err != nil {
 			return report.Model{}, err
+		}
+		if closeErr != nil {
+			return report.Model{}, closeErr
+		}
+		if len(data) > maxBundleEntryBytes {
+			return report.Model{}, errors.New("report.json exceeds the 64 MiB limit")
 		}
 		var model report.Model
 		if err := json.Unmarshal(data, &model); err != nil {
@@ -181,10 +270,13 @@ func timelineJSONL(events []evidence.Event) string {
 	return b.String()
 }
 func mustJSON(value any) []byte { data, _ := json.MarshalIndent(value, "", "  "); return data }
-func safeName(name string) error {
-	clean := path.Clean(strings.ReplaceAll(name, "\\", "/"))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
-		return fmt.Errorf("unsafe bundle entry %q", name)
+func safeName(name string) (string, error) {
+	if name == "" || len(name) > 4096 || strings.ContainsRune(name, '\x00') || strings.Contains(name, "\\") || strings.Contains(name, ":") {
+		return "", fmt.Errorf("unsafe bundle entry %q", name)
 	}
-	return nil
+	clean := path.Clean(name)
+	if clean != name || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", fmt.Errorf("unsafe bundle entry %q", name)
+	}
+	return clean, nil
 }

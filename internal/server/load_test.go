@@ -16,6 +16,11 @@ import (
 func TestFortyConcurrentInteractiveSessions(t *testing.T) {
 	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "load"}, Spec: scenario.ScenarioSpec{RHEL: scenario.RHELSpec{Major: 8, Hostname: "load.example", SELinux: "enforcing"}, Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000, Groups: []string{"wheel"}}}}, Scoring: scenario.ScoringSpec{AutomatedMaximum: 1}}}}
 	app := New("event.yaml", scenario.Event{Metadata: scenario.DocumentMeta{ID: "load-event"}, Spec: scenario.EventSpec{Sessions: scenario.SessionsSpec{MaxConcurrent: 40}}}, map[string]scenario.Package{"load": pkg}, nil)
+	teamSecrets := make(map[string]string, 40)
+	for i := 0; i < 40; i++ {
+		teamSecrets[fmt.Sprintf("TEAM-%d", i+1)] = fmt.Sprintf("secret-%d", i+1)
+	}
+	configureTestCredentials(t, app, teamSecrets)
 	started := time.Now()
 	errorsCh := make(chan error, 40)
 	var wait sync.WaitGroup
@@ -32,7 +37,7 @@ func TestFortyConcurrentInteractiveSessions(t *testing.T) {
 				app.Handler().ServeHTTP(record, req)
 				return record
 			}
-			login := serve(http.MethodPost, "/api/v1/auth/team/login", []byte(fmt.Sprintf(`{"teamID":"TEAM-%d"}`, i+1)))
+			login := serve(http.MethodPost, "/api/v1/auth/team/login", []byte(fmt.Sprintf(`{"teamID":"TEAM-%d","joinCode":"secret-%d"}`, i+1, i+1)))
 			if login.Code != http.StatusOK {
 				errorsCh <- fmt.Errorf("team %d login: %d", i+1, login.Code)
 				return
@@ -74,8 +79,14 @@ func TestFortyConcurrentInteractiveSessions(t *testing.T) {
 	for err := range errorsCh {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Fatalf("40-session interactive burst took %s; target is 5s", elapsed)
+	limit := 5 * time.Second
+	if raceEnabled {
+		// The race detector instruments synchronization and makes the deliberately
+		// expensive bcrypt login checks substantially slower.
+		limit = 30 * time.Second
+	}
+	if elapsed := time.Since(started); elapsed > limit {
+		t.Fatalf("40-session interactive burst took %s; target is %s", elapsed, limit)
 	}
 	if len(app.Sessions) != 40 {
 		t.Fatalf("sessions = %d, want 40", len(app.Sessions))

@@ -68,7 +68,7 @@ The same Git commands work in Bash, macOS Terminal, and Linux shells. This sourc
 Required only when compiling from source:
 
 - Git 2.30 or newer.
-- Go 1.26 or newer. The required version is declared in [`go.mod`](go.mod).
+- Go 1.26.6 or newer. The minimum patched toolchain is declared in [`go.mod`](go.mod).
 - A terminal. Windows PowerShell, macOS Terminal, and Linux shells are supported.
 
 Not required:
@@ -412,11 +412,17 @@ RedLab is designed to be safe for an untrusted participant command stream:
 - The virtual shell is parsed by `internal/shell`; it is not the host shell.
 - `internal/system` owns virtual files, services, identities, packages, network state, and time.
 - Participant command paths contain no host process execution, host environment forwarding, host network dialing, or host filesystem mapping.
+- Local serving is forced to loopback unless the organizer explicitly opts in with `--lan`; clients refuse plaintext remote joins and pin the event TLS certificate fingerprint.
+- Authentication fails closed if credentials are missing or invalid. New credentials use bcrypt, and successful use of a legacy credential upgrades it automatically.
+- Scenario archives and evidence bundles have canonical-path, symlink, entry-count, and size controls; extraction is rooted in a newly created destination.
+- Scenario-defined passwords are redacted from transcripts, reports, and exported evidence. Do not put real production credentials in scenarios or events.
 - Evidence chains and signed bundle manifests make post-event tampering detectable.
 - Event credentials are stored as hashes, and refresh tokens are rotated and hashed.
 - Sessions can be reset and replayed deterministically.
 
 The emulator is not a full Bash or RHEL implementation. Run `catalog commands` to see the current compatibility level. Level A behavior is scenario-grade, Level B is common inspection, and Level C is recognized but intentionally unsupported at depth. Do not use RedLab as a general-purpose shell or as a replacement for production infrastructure.
+
+The organizer server is intended for localhost, a trusted hackathon LAN, or a private VPN. It has not been designed as an internet-facing multi-tenant service. See [`docs/threat-model.md`](docs/threat-model.md) for the complete trust boundary and operational assumptions.
 
 ## 14. Troubleshooting
 

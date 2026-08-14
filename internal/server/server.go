@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
@@ -44,6 +45,7 @@ type Server struct {
 	securityErr     error
 	Credentials     auth.File
 	credentialErr   error
+	credentialMu    sync.Mutex
 	manualClose     bool
 	ScenarioSources map[string]string
 	rateMu          sync.Mutex
@@ -85,9 +87,7 @@ type rateWindow struct {
 
 func New(eventFile string, event scenario.Event, packages map[string]scenario.Package, db *store.Store) *Server {
 	credentials, credentialErr := auth.Load(filepath.Join(filepath.Dir(eventFile), "data", "credentials.json"))
-	if os.IsNotExist(credentialErr) {
-		credentialErr = nil
-	} else if credentialErr == nil {
+	if credentialErr == nil {
 		credentialErr = auth.EnsureValid(credentials)
 	}
 	var signingKey []byte
@@ -107,7 +107,7 @@ func New(eventFile string, event scenario.Event, packages map[string]scenario.Pa
 		}
 	}
 	s := &Server{Event: event, EventFile: eventFile, Packages: packages, Store: db, Sessions: map[string]*runtime.Session{}, Restarts: map[string]int{}, Activity: map[string]time.Time{}, Tokens: map[string]string{}, TokenExpiry: map[string]time.Time{}, RefreshTokens: map[string]string{}, SigningKey: signingKey, securityErr: securityErr, Credentials: credentials, credentialErr: credentialErr, rate: map[string]rateWindow{}, ScenarioSources: sources, upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}}
-	s.HTTP = &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	s.HTTP = &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 	return s
 }
 func (s *Server) Handler() http.Handler {
@@ -127,7 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/sessions/", s.sessions)
 	mux.HandleFunc("/api/v1/submissions/", s.submissions)
 	mux.HandleFunc("/", s.dashboard)
-	return s.limitMiddleware(mux)
+	return s.securityHeaders(s.limitMiddleware(mux))
 }
 func (s *Server) ListenAndServe(address string) error {
 	s.HTTP.Addr = address
@@ -214,13 +214,17 @@ func (s *Server) Recover() error {
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	if s.Store != nil {
 		if err := s.Store.Health(); err != nil {
-			writeError(w, 503, err)
+			writeError(w, http.StatusServiceUnavailable, errors.New("database health check failed"))
 			return
 		}
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
+	if s.credentialStatus() != nil || s.securityErr != nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("authentication services are unavailable"))
+		return
+	}
 	if len(s.Packages) == 0 || s.eventStatus() == "scheduled" {
 		writeError(w, 503, errors.New("no scenario packages loaded"))
 		return
@@ -234,7 +238,7 @@ func (s *Server) preflight(w http.ResponseWriter, _ *http.Request) {
 		checks["database"] = "missing"
 		status = http.StatusServiceUnavailable
 	} else if err := s.Store.Health(); err != nil {
-		checks["database"] = err.Error()
+		checks["database"] = "unavailable"
 		status = http.StatusServiceUnavailable
 	} else {
 		checks["database"] = "ok"
@@ -251,11 +255,27 @@ func (s *Server) preflight(w http.ResponseWriter, _ *http.Request) {
 	} else {
 		checks["event"] = "ok"
 	}
+	if err := s.credentialStatus(); err != nil {
+		checks["credentials"] = "unavailable"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["credentials"] = "ok"
+	}
+	if s.securityErr != nil {
+		checks["tokenSigning"] = "unavailable"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["tokenSigning"] = "ok"
+	}
 	checks["schedule"] = s.eventStatus()
 	writeJSON(w, status, map[string]any{"status": map[int]string{http.StatusOK: "ok", http.StatusServiceUnavailable: "failed"}[status], "checks": checks})
 }
 func (s *Server) teamLogin(w http.ResponseWriter, r *http.Request) {
-	if s.credentialErr != nil {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	if s.credentialStatus() != nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("credential store is unavailable"))
 		return
 	}
@@ -266,14 +286,22 @@ func (s *Server) teamLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	access, refresh, err := s.issueTeamTokens(req.TeamID, req.JoinCode)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		if errors.Is(err, errInvalidTeamCredentials) {
+			writeError(w, http.StatusUnauthorized, errInvalidTeamCredentials)
+		} else {
+			writeError(w, http.StatusInternalServerError, errors.New("authentication service failed"))
+		}
 		return
 	}
 	writeJSON(w, 200, map[string]string{"accessToken": access, "refreshToken": refresh, "expiresIn": "1800", "teamID": req.TeamID})
 }
 
 func (s *Server) linkLogin(w http.ResponseWriter, r *http.Request) {
-	if s.credentialErr != nil {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	if s.credentialStatus() != nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("credential store is unavailable"))
 		return
 	}
@@ -282,41 +310,45 @@ func (s *Server) linkLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("teamID, joinCode, and linkToken are required"))
 		return
 	}
-	s.mu.RLock()
-	link := s.Credentials.Link
-	s.mu.RUnlock()
-	if !auth.Verify(link, req.LinkToken) {
+	validLink, err := s.verifyCredential("link", "", req.LinkToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("authentication service failed"))
+		return
+	}
+	if !validLink {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid event link token"))
 		return
 	}
 	access, refresh, err := s.issueTeamTokens(req.TeamID, req.JoinCode)
 	if err != nil {
-		if strings.Contains(err.Error(), "credentials") || strings.Contains(err.Error(), "unknown team") {
-			writeError(w, http.StatusUnauthorized, err)
+		if errors.Is(err, errInvalidTeamCredentials) {
+			writeError(w, http.StatusUnauthorized, errInvalidTeamCredentials)
 		} else {
-			writeError(w, http.StatusInternalServerError, err)
+			writeError(w, http.StatusInternalServerError, errors.New("authentication service failed"))
 		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"accessToken": access, "refreshToken": refresh, "expiresIn": "1800", "teamID": req.TeamID})
 }
 
+var errInvalidTeamCredentials = errors.New("invalid team credentials")
+
 func (s *Server) issueTeamTokens(teamID, joinCode string) (string, string, error) {
-	s.mu.RLock()
-	teams := s.Credentials.Teams
-	s.mu.RUnlock()
-	if record, configured := teams[teamID]; configured && !auth.Verify(record, joinCode) {
-		return "", "", errors.New("invalid team credentials")
+	valid, err := s.verifyCredential("team", teamID, joinCode)
+	if err != nil {
+		return "", "", err
 	}
-	if len(teams) > 0 {
-		if _, configured := teams[teamID]; !configured {
-			return "", "", errors.New("unknown team")
-		}
+	if !valid {
+		return "", "", errInvalidTeamCredentials
 	}
 	return s.issueTokens(teamID)
 }
 func (s *Server) organizerLogin(w http.ResponseWriter, r *http.Request) {
-	if s.credentialErr != nil {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	if s.credentialStatus() != nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("credential store is unavailable"))
 		return
 	}
@@ -325,7 +357,12 @@ func (s *Server) organizerLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, errors.New("password is required"))
 		return
 	}
-	if s.Credentials.Organizer.Hash != "" && !auth.Verify(s.Credentials.Organizer, req.Password) {
+	valid, err := s.verifyCredential("organizer", "", req.Password)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("authentication service failed"))
+		return
+	}
+	if !valid {
 		writeError(w, http.StatusUnauthorized, errors.New("invalid organizer credentials"))
 		return
 	}
@@ -335,6 +372,72 @@ func (s *Server) organizerLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"accessToken": access, "refreshToken": refresh, "expiresIn": "1800"})
+}
+
+func (s *Server) credentialStatus() error {
+	s.credentialMu.Lock()
+	defer s.credentialMu.Unlock()
+	return s.credentialErr
+}
+
+func (s *Server) verifyCredential(kind, teamID, secret string) (bool, error) {
+	s.credentialMu.Lock()
+	defer s.credentialMu.Unlock()
+	if s.credentialErr != nil {
+		return false, s.credentialErr
+	}
+	var record auth.Record
+	switch kind {
+	case "organizer":
+		record = s.Credentials.Organizer
+	case "link":
+		record = s.Credentials.Link
+	case "team":
+		var ok bool
+		record, ok = s.Credentials.Teams[teamID]
+		if !ok {
+			return false, nil
+		}
+	default:
+		return false, errors.New("unknown credential kind")
+	}
+	if !auth.Verify(record, secret) {
+		return false, nil
+	}
+	if !auth.NeedsUpgrade(record) {
+		return true, nil
+	}
+	upgraded, err := auth.NewRecord(secret)
+	if err != nil {
+		return false, err
+	}
+	credentials := s.Credentials
+	credentials.Teams = cloneCredentialTeams(s.Credentials.Teams)
+	switch kind {
+	case "organizer":
+		credentials.Organizer = upgraded
+	case "link":
+		credentials.Link = upgraded
+	case "team":
+		credentials.Teams[teamID] = upgraded
+	}
+	if err := auth.Save(s.credentialsPath(), credentials); err != nil {
+		return false, err
+	}
+	s.Credentials = credentials
+	return true, nil
+}
+
+func (s *Server) credentialsPath() string {
+	return filepath.Join(filepath.Dir(s.EventFile), "data", "credentials.json")
+}
+
+func cloneCredentialTeams(teams map[string]auth.Record) map[string]auth.Record {
+	clone := make(map[string]auth.Record, len(teams))
+	for teamID, record := range teams {
+		clone[teamID] = record
+	}
+	return clone
 }
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
@@ -391,7 +494,17 @@ func (s *Server) event(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, errors.New("method not allowed"))
 		return
 	}
-	writeJSON(w, 200, s.Event)
+	type publicEventSpec struct {
+		Schedule scenario.Schedule     `json:"schedule"`
+		Sessions scenario.SessionsSpec `json:"sessions"`
+		Scoring  scenario.EventScoring `json:"scoring"`
+	}
+	writeJSON(w, 200, struct {
+		APIVersion string                `json:"apiVersion"`
+		Kind       string                `json:"kind"`
+		Metadata   scenario.DocumentMeta `json:"metadata"`
+		Spec       publicEventSpec       `json:"spec"`
+	}{s.Event.APIVersion, s.Event.Kind, s.Event.Metadata, publicEventSpec{s.Event.Spec.Schedule, s.Event.Spec.Sessions, s.Event.Spec.Scoring}})
 }
 func (s *Server) scenarios(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -423,9 +536,9 @@ func (s *Server) organizer(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 4 && parts[3] == "link-token" {
 		if r.Method == http.MethodGet {
-			s.mu.RLock()
+			s.credentialMu.Lock()
 			configured := s.Credentials.Link.Hash != ""
-			s.mu.RUnlock()
+			s.credentialMu.Unlock()
 			writeJSON(w, http.StatusOK, map[string]bool{"configured": configured})
 			return
 		}
@@ -522,19 +635,17 @@ func (s *Server) rotateLinkToken(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	credentialsPath := filepath.Join(filepath.Dir(s.EventFile), "data", "credentials.json")
-	s.mu.Lock()
+	s.credentialMu.Lock()
+	defer s.credentialMu.Unlock()
 	credentials := s.Credentials
+	credentials.Teams = cloneCredentialTeams(s.Credentials.Teams)
 	credentials.Link = record
-	s.mu.Unlock()
-	if err := auth.Save(credentialsPath, credentials); err != nil {
+	if err := auth.Save(s.credentialsPath(), credentials); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.mu.Lock()
 	s.Credentials = credentials
 	s.credentialErr = nil
-	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"token": token, "rotatedAt": time.Now().UTC()})
 }
 
@@ -620,7 +731,12 @@ func (s *Server) createSession(w http.ResponseWriter, teamID string) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no scenario available"))
 		return
 	}
-	id := "session-" + newToken(teamID)[:16]
+	randomID, err := opaqueToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errors.New("could not create a secure session id"))
+		return
+	}
+	id := "session-" + randomID[:32]
 	seed := deterministicSeed(s.Event.Metadata.ID, teamID, pkg.Scenario.Metadata.ID)
 	session, err := runtime.NewSession(id, teamID, pkg, seed)
 	if err != nil {
@@ -810,7 +926,7 @@ func (s *Server) persistSession(session *runtime.Session) error {
 		return err
 	}
 	model := session.Report(s.Event.Metadata.ID)
-	for _, event := range model.Timeline {
+	for _, event := range session.PersistenceEvents() {
 		if err := s.Store.SaveEvidence(event); err != nil {
 			return err
 		}
@@ -1131,27 +1247,59 @@ func (s *Server) limitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		// A generated self-signed certificate may be replaced between events. Do not
+		// pin it in a browser with HSTS; reserve HSTS for organizer-provided PKI.
+		if r.TLS != nil && s.Event.Spec.Server.TLS.Mode == "provided" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) allowRequest(r *http.Request) bool {
 	key := r.RemoteAddr
 	if index := strings.LastIndexByte(key, ':'); index > 0 {
 		key = key[:index]
 	}
+	limit := 120
+	if strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+		key += "|auth"
+		limit = 20
+	} else {
+		key += "|general"
+	}
 	now := time.Now()
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
+	if len(s.rate) > 1024 {
+		for candidate, window := range s.rate {
+			if now.Sub(window.Started) >= time.Minute {
+				delete(s.rate, candidate)
+			}
+		}
+	}
+	if _, exists := s.rate[key]; !exists && len(s.rate) >= 4096 {
+		return false
+	}
 	window := s.rate[key]
 	if window.Started.IsZero() || now.Sub(window.Started) >= time.Minute {
 		window = rateWindow{Started: now}
 	}
 	window.Count++
 	s.rate[key] = window
-	return window.Count <= 120
+	return window.Count <= limit
 }
 
-func newToken(seed string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", seed, time.Now().UnixNano())))
-	return hex.EncodeToString(sum[:])
-}
 func opaqueToken() (string, error) {
 	data := make([]byte, 32)
 	if _, err := rand.Read(data); err != nil {

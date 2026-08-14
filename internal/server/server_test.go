@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
-	"github.com/redlab/redlab/internal/auth"
 	"github.com/redlab/redlab/internal/scenario"
 	"github.com/redlab/redlab/internal/store"
 )
@@ -25,8 +24,9 @@ func TestTeamSessionAPI(t *testing.T) {
 	defer db.Close()
 	eventFile := filepath.Join(t.TempDir(), "event.yaml")
 	app := New(eventFile, scenario.Event{APIVersion: "redlab/v1", Kind: "Event", Metadata: scenario.DocumentMeta{ID: "event", Title: "Event"}}, map[string]scenario.Package{"test": pkg}, db)
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "team-secret"})
 	login := httptest.NewRecorder()
-	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"TEAM-1"}`)))
+	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"TEAM-1","joinCode":"team-secret"}`)))
 	if login.Code != 200 {
 		t.Fatalf("login status %d: %s", login.Code, login.Body.String())
 	}
@@ -79,10 +79,7 @@ func TestOrganizerLifecycleAndDashboard(t *testing.T) {
 	}
 	defer db.Close()
 	app := New("event.yaml", scenario.Event{APIVersion: "redlab/v1", Kind: "Event", Metadata: scenario.DocumentMeta{ID: "event", Title: "Event"}, Spec: scenario.EventSpec{Sessions: scenario.SessionsSpec{AllowRestart: true, MaxRestarts: 1}}}, map[string]scenario.Package{"test": pkg}, db)
-	app.Credentials.Organizer, err = auth.NewRecord("organizer-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "team-secret"})
 	login := httptest.NewRecorder()
 	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/organizer/login", bytes.NewBufferString(`{"password":"organizer-secret"}`)))
 	if login.Code != http.StatusOK {
@@ -123,19 +120,7 @@ func TestEventLinkTokenLoginAndRotation(t *testing.T) {
 	defer db.Close()
 	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "test", Title: "Test"}, Spec: scenario.ScenarioSpec{RHEL: scenario.RHELSpec{Major: 8, Hostname: "test.example"}, Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000}}}}}}
 	app := New(filepath.Join(root, "event.yaml"), scenario.Event{Metadata: scenario.DocumentMeta{ID: "event"}}, map[string]scenario.Package{"test": pkg}, db)
-	organizer, err := auth.NewRecord("organizer-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	team, err := auth.NewRecord("team-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	link, err := auth.NewRecord("link-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	app.Credentials = auth.File{Organizer: organizer, Link: link, Teams: map[string]auth.Record{"TEAM-1": team}}
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "team-secret"})
 	login := func(token string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/link", bytes.NewBufferString(`{"teamID":"TEAM-1","joinCode":"team-secret","linkToken":"`+token+`"}`))
 		response := httptest.NewRecorder()
@@ -181,12 +166,9 @@ func TestAPIRestartRefreshHintsNotesAndJudging(t *testing.T) {
 	}
 	defer db.Close()
 	app := New("event.yaml", scenario.Event{APIVersion: "redlab/v1", Kind: "Event", Metadata: scenario.DocumentMeta{ID: "event", Title: "Event"}, Spec: scenario.EventSpec{Scoring: scenario.EventScoring{HintsEnabled: true}, Sessions: scenario.SessionsSpec{AllowRestart: true, MaxRestarts: 1}}}, map[string]scenario.Package{"test": pkg}, db)
-	app.Credentials.Organizer, err = auth.NewRecord("organizer-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "team-secret"})
 	login := httptest.NewRecorder()
-	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"TEAM-1"}`)))
+	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"TEAM-1","joinCode":"team-secret"}`)))
 	if login.Code != http.StatusOK {
 		t.Fatalf("team login: %d %s", login.Code, login.Body.String())
 	}
@@ -255,8 +237,9 @@ func TestSignedAccessAndPersistentRefresh(t *testing.T) {
 	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "test"}, Spec: scenario.ScenarioSpec{RHEL: scenario.RHELSpec{Major: 8, Hostname: "test.example"}, Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000}}}}}}
 	event := scenario.Event{Metadata: scenario.DocumentMeta{ID: "event"}}
 	app := New("event.yaml", event, map[string]scenario.Package{"test": pkg}, db)
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "team-secret"})
 	login := httptest.NewRecorder()
-	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"TEAM-1"}`)))
+	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"TEAM-1","joinCode":"team-secret"}`)))
 	if login.Code != http.StatusOK {
 		t.Fatalf("login: %d %s", login.Code, login.Body.String())
 	}
@@ -268,6 +251,7 @@ func TestSignedAccessAndPersistentRefresh(t *testing.T) {
 		t.Fatalf("access token is not signed: %q", first["accessToken"])
 	}
 	recovered := New("event.yaml", event, map[string]scenario.Package{"test": pkg}, db)
+	configureTestCredentials(t, recovered, map[string]string{"TEAM-1": "team-secret"})
 	refresh := httptest.NewRecorder()
 	recovered.Handler().ServeHTTP(refresh, httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", bytes.NewBufferString(`{"refreshToken":"`+first["refreshToken"]+`"}`)))
 	if refresh.Code != http.StatusOK {
@@ -288,9 +272,11 @@ func TestTeamRoleIsolation(t *testing.T) {
 	defer db.Close()
 	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "test"}, Spec: scenario.ScenarioSpec{RHEL: scenario.RHELSpec{Major: 8, Hostname: "test.example"}, Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000}}}}}}
 	app := New("event.yaml", scenario.Event{Metadata: scenario.DocumentMeta{ID: "event"}}, map[string]scenario.Package{"test": pkg}, db)
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "secret-1", "TEAM-2": "secret-2"})
 	login := func(team string) string {
 		record := httptest.NewRecorder()
-		app.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"`+team+`"}`)))
+		secret := map[string]string{"TEAM-1": "secret-1", "TEAM-2": "secret-2"}[team]
+		app.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodPost, "/api/v1/auth/team/login", bytes.NewBufferString(`{"teamID":"`+team+`","joinCode":"`+secret+`"}`)))
 		var response map[string]string
 		if err := json.Unmarshal(record.Body.Bytes(), &response); err != nil {
 			t.Fatal(err)
@@ -334,10 +320,11 @@ func TestTeamRoleIsolation(t *testing.T) {
 func TestTerminalProtocolSupportsResumeCursor(t *testing.T) {
 	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "test"}, Spec: scenario.ScenarioSpec{RHEL: scenario.RHELSpec{Major: 8, Hostname: "test.example"}, Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000}}}}}}
 	app := New("event.yaml", scenario.Event{Metadata: scenario.DocumentMeta{ID: "event"}}, map[string]scenario.Package{"test": pkg}, nil)
+	configureTestCredentials(t, app, map[string]string{"TEAM-1": "team-secret"})
 	httpServer := httptest.NewServer(app.Handler())
 	defer httpServer.Close()
 	client := httpServer.Client()
-	login, err := client.Post(httpServer.URL+"/api/v1/auth/team/login", "application/json", bytes.NewBufferString(`{"teamID":"TEAM-1"}`))
+	login, err := client.Post(httpServer.URL+"/api/v1/auth/team/login", "application/json", bytes.NewBufferString(`{"teamID":"TEAM-1","joinCode":"team-secret"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

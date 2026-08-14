@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -22,9 +23,17 @@ func EnsureCertificate(directory, hostname string) (certFile, keyFile, fingerpri
 		return "", "", "", err
 	}
 	certFile, keyFile = filepath.Join(directory, "server.crt"), filepath.Join(directory, "server.key")
+	// #nosec G304 -- both basenames are fixed and directory is the organizer-selected event data directory.
 	if certPEM, readErr := os.ReadFile(certFile); readErr == nil {
-		if _, keyErr := os.Stat(keyFile); keyErr == nil {
-			return certFile, keyFile, certificateFingerprint(certPEM), nil
+		if _, keyErr := tls.LoadX509KeyPair(certFile, keyFile); keyErr == nil {
+			if block, _ := pem.Decode(certPEM); block != nil {
+				if certificate, parseErr := x509.ParseCertificate(block.Bytes); parseErr == nil && time.Now().After(certificate.NotBefore) && time.Now().Before(certificate.NotAfter) {
+					if fingerprint := certificateFingerprint(certPEM); fingerprint != "" {
+						_ = os.Chmod(keyFile, 0600)
+						return certFile, keyFile, fingerprint, nil
+					}
+				}
+			}
 		}
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -46,10 +55,13 @@ func EnsureCertificate(directory, hostname string) (certFile, keyFile, fingerpri
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+	if err := writeFileAtomic(certFile, certPEM, 0600); err != nil {
 		return "", "", "", err
 	}
-	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+	if err := writeFileAtomic(keyFile, keyPEM, 0600); err != nil {
+		return "", "", "", err
+	}
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
 		return "", "", "", err
 	}
 	return certFile, keyFile, certificateFingerprint(certPEM), nil

@@ -155,9 +155,14 @@ func (s *Server) importScenario(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	if err := r.ParseMultipartForm(maxScenarioUpload); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxScenarioUpload+(1<<20))
+	// #nosec G120 -- MaxBytesReader caps the entire body and ParseMultipartForm caps in-memory buffering.
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, errors.New("scenario upload must be multipart form data"))
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	file, _, err := r.FormFile("file")
 	if err != nil {
@@ -177,9 +182,15 @@ func (s *Server) importScenario(w http.ResponseWriter, r *http.Request) {
 	}
 	tempName := temp.Name()
 	defer os.Remove(tempName)
-	if _, err := io.Copy(temp, io.LimitReader(file, maxScenarioUpload+1)); err != nil {
+	written, err := io.Copy(temp, io.LimitReader(file, maxScenarioUpload+1))
+	if err != nil {
 		_ = temp.Close()
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if written > maxScenarioUpload {
+		_ = temp.Close()
+		writeError(w, http.StatusRequestEntityTooLarge, errors.New("scenario upload exceeds the 64 MiB limit"))
 		return
 	}
 	if err := temp.Close(); err != nil {
@@ -460,7 +471,7 @@ func (s *Server) persistEvent(event scenario.Event) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.EventFile, data, 0600)
+	return writeFileAtomic(s.EventFile, data, 0600)
 }
 
 func diagnosticsError(diagnostics []scenario.Diagnostic) error {

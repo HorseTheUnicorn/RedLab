@@ -2,12 +2,12 @@ package scenario
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // LoadScenarioYAML validates a scenario document while preserving the supplied
@@ -46,14 +46,29 @@ func (p Package) WriteArchive(w io.Writer) error {
 	if len(p.Files) == 0 {
 		return fmt.Errorf("scenario package has no files")
 	}
+	if len(p.Files) > maxPackageFiles {
+		return fmt.Errorf("scenario contains more than %d files", maxPackageFiles)
+	}
 	writer := zip.NewWriter(w)
 	keys := make([]string, 0, len(p.Files))
-	for key := range p.Files {
+	normalized := make(map[string][]byte, len(p.Files))
+	var total int64
+	for key, data := range p.Files {
 		safe, err := safePackagePath(key)
 		if err != nil {
 			_ = writer.Close()
 			return err
 		}
+		if _, exists := normalized[safe]; exists {
+			_ = writer.Close()
+			return fmt.Errorf("duplicate canonical package path %q", safe)
+		}
+		if int64(len(data)) > maxPackageBytes || total+int64(len(data)) > maxPackageBytes {
+			_ = writer.Close()
+			return errors.New("scenario package exceeds the total size limit")
+		}
+		total += int64(len(data))
+		normalized[safe] = data
 		keys = append(keys, safe)
 	}
 	sort.Strings(keys)
@@ -63,7 +78,7 @@ func (p Package) WriteArchive(w io.Writer) error {
 			_ = writer.Close()
 			return err
 		}
-		if _, err := entry.Write(p.Files[key]); err != nil {
+		if _, err := entry.Write(normalized[key]); err != nil {
 			_ = writer.Close()
 			return err
 		}
@@ -74,18 +89,35 @@ func (p Package) WriteArchive(w io.Writer) error {
 // WriteArchiveFile writes a package to a path without exposing the package's
 // source directory or allowing callers to construct unsafe archive entries.
 func (p Package) WriteArchiveFile(filename string) error {
-	if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
+	directory := filepath.Dir(filename)
+	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
-	file, err := os.Create(filename)
+	file, err := os.CreateTemp(directory, ".scenario-*.tmp")
 	if err != nil {
+		return err
+	}
+	temporaryName := file.Name()
+	defer os.Remove(temporaryName)
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
 		return err
 	}
 	if err := p.WriteArchive(file); err != nil {
 		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, filename); err != nil {
+		return err
+	}
+	return os.Chmod(filename, 0600)
 }
 
 // ExtractPackage safely materializes a validated .rlab archive for local
@@ -99,30 +131,58 @@ func ExtractPackage(filename, destination string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if _, err := os.Lstat(root); err == nil {
+		return fmt.Errorf("refusing to extract into existing destination: %s", destination)
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-	for key, data := range pkg.Files {
+	if err := os.MkdirAll(filepath.Dir(root), 0700); err != nil {
+		return err
+	}
+	if err := os.Mkdir(root, 0700); err != nil {
+		return err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = os.RemoveAll(root)
+		}
+	}()
+	scoped, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer scoped.Close()
+	keys := make([]string, 0, len(pkg.Files))
+	for key := range pkg.Files {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		data := pkg.Files[key]
 		safe, err := safePackagePath(key)
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(root, filepath.FromSlash(safe))
-		absolute, err := filepath.Abs(target)
+		relative := filepath.FromSlash(safe)
+		if directory := filepath.Dir(relative); directory != "." {
+			if err := scoped.MkdirAll(directory, 0700); err != nil {
+				return err
+			}
+		}
+		output, err := scoped.OpenFile(relative, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			return err
 		}
-		prefix := root + string(filepath.Separator)
-		if absolute != root && !strings.HasPrefix(absolute, prefix) {
-			return fmt.Errorf("package file escapes destination: %s", key)
-		}
-		if err := os.MkdirAll(filepath.Dir(absolute), 0700); err != nil {
+		if _, err := output.Write(data); err != nil {
+			_ = output.Close()
 			return err
 		}
-		if err := os.WriteFile(absolute, data, 0600); err != nil {
+		if err := output.Close(); err != nil {
 			return err
 		}
 	}
+	success = true
 	return nil
 }
 

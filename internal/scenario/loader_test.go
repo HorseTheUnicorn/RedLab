@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,5 +79,59 @@ func TestScenarioDocumentSizeLimit(t *testing.T) {
 	_, diagnostics := LoadScenario(filepath.Dir(filename))
 	if len(diagnostics) == 0 {
 		t.Fatal("oversized scenario document was accepted")
+	}
+}
+
+func TestExtractPackageRequiresFreshDestination(t *testing.T) {
+	root := t.TempDir()
+	archive := filepath.Join(root, "scenario.rlab")
+	pkg := Package{Files: map[string][]byte{"scenario.yaml": []byte(minimalScenario), "files/etc/redlab/test.conf": []byte("safe\n")}}
+	if err := pkg.WriteArchiveFile(archive); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(root, "existing")
+	if err := os.Mkdir(existing, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ExtractPackage(archive, existing); err == nil {
+		t.Fatal("archive extraction accepted an existing destination")
+	}
+	destination := filepath.Join(root, "fresh")
+	if err := ExtractPackage(archive, destination); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(destination, "files", "etc", "redlab", "test.conf"))
+	if err != nil || string(data) != "safe\n" {
+		t.Fatalf("extracted fixture = %q, %v", data, err)
+	}
+}
+
+func TestExtractPackageRejectsSymlinkDestination(t *testing.T) {
+	root := t.TempDir()
+	archive := filepath.Join(root, "scenario.rlab")
+	pkg := Package{Files: map[string][]byte{"scenario.yaml": []byte(minimalScenario)}}
+	if err := pkg.WriteArchiveFile(archive); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "destination")
+	if err := os.Symlink(outside, destination); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	if err := ExtractPackage(archive, destination); err == nil {
+		t.Fatal("archive extraction followed a destination symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "scenario.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("archive wrote through destination symlink: %v", err)
+	}
+}
+
+func TestWriteArchiveRejectsCanonicalPathCollision(t *testing.T) {
+	pkg := Package{Files: map[string][]byte{"scenario.yaml": []byte(minimalScenario), "files/a/../b": []byte("one"), "files/b": []byte("two")}}
+	if err := pkg.WriteArchive(&bytes.Buffer{}); err == nil {
+		t.Fatal("canonical archive path collision was accepted")
 	}
 }
