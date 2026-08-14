@@ -1,0 +1,45 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: cascade-workflow-recovery, title: Cascade Workflow Recovery, version: 1.0.0, authors: [RedLab], tags: [rhel8, cascade, workflow, systemd, firewalld]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: cascade01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [coreutils, systemd, firewalld, networking, web]}
+  briefing: {difficulty: intermediate, duration: 60m, summary: Restore the Cascade workflow API after its queue worker was disabled by configuration drift., objectivesShownToParticipants: [Enable the Cascade queue, Restore the workflow worker, Verify the API, Preserve SELinux enforcing mode]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem:
+    templates: []
+    entries:
+      - {path: /etc/cascade/cascade.yaml, owner: root, group: root, mode: "0644", selinuxType: etc_t, append: "queue: disabled\nworker_concurrency: 4\n"}
+      - {path: /var/log/cascade/worker.log, owner: root, group: adm, mode: "0640", append: "queue consumer is disabled\n"}
+  packages: {installed: [{name: cascade-server, version: 3.4.2-1.el8}, {name: firewalld, version: 1.3.4-9.el8}]}
+  services:
+    - name: cascade-worker.service
+      enabled: true
+      state: failed
+      startConditions: [{type: fileContains, path: /etc/cascade/cascade.yaml, pattern: 'queue: enabled'}]
+      onFailure: {journal: [{priority: err, message: "Cascade worker queue is disabled in configuration"}]}
+    - {name: cascade-api.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}
+    - {name: firewalld.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}
+  network:
+    interfaces: [{name: ens192, state: up, addresses: [10.20.60.15/24]}]
+    dns: {servers: [10.20.60.10], records: {cascade.example.test: 10.20.60.15}}
+    firewall: {defaultZone: public, zones: {public: {interfaces: [ens192], services: [ssh]}}}
+    simulatedHosts: []
+  faults: [{id: queue-disabled, descriptionForJudges: The Cascade workflow queue is disabled and the worker cannot start, evidence: [/etc/cascade/cascade.yaml, /var/log/cascade/worker.log, journal:cascade-worker.service]}, {id: blocked-cascade-api, descriptionForJudges: The public firewall zone does not permit the Cascade API, evidence: []}]
+  rules:
+    - id: publish-cascade-health
+      when: {all: [{type: serviceRunning, name: cascade-worker.service}, {type: serviceRunning, name: cascade-api.service}, {type: firewallServiceAllowed, zone: public, service: http}]}
+      effects:
+        - {type: setPort, address: 10.20.60.15, port: 8080, protocol: tcp, state: open}
+        - {type: setHttpResponse, url: http://cascade.example.test/health, status: 200, body: "Cascade OK\n"}
+  objectives:
+    - {id: queue-enabled, title: Enable the Cascade queue, points: 25, checks: {type: fileContains, path: /etc/cascade/cascade.yaml, pattern: 'queue: enabled'}}
+    - {id: worker-running, title: Restore the Cascade workflow worker, points: 25, checks: {type: serviceRunning, name: cascade-worker.service}}
+    - {id: api-health, title: Verify the Cascade API, points: 20, checks: {type: httpStatus, url: http://cascade.example.test/health, status: 200}}
+    - {id: preserve-selinux, title: Preserve SELinux, points: 10, checks: {type: selinuxMode, value: enforcing}}
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -15, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-worker-log, cost: 3, text: "Read the worker log and service journal, then compare the queue setting with the expected operating mode."}, {id: check-firewall, cost: 5, unlockAfter: 20m, text: "Verify that the active zone allows the API protocol."}]
+  scoring: {automatedMaximum: 80, judgeMaximum: 0, completionBonus: 5, minimumPassingScore: 60}
+  referenceSolution: ["printf 'queue: enabled\\nworker_concurrency: 4\\n' | sudo tee /etc/cascade/cascade.yaml", "sudo systemctl start cascade-worker.service", "sudo firewall-cmd --add-service=http", "curl http://cascade.example.test/health"]
+  referenceSolutions:
+    - ["echo 'queue: enabled' | sudo tee /etc/cascade/cascade.yaml", "sudo systemctl restart cascade-worker.service", "sudo firewall-cmd --zone=public --add-service=http", "curl http://cascade.example.test/health"]
+  judgeRubrics: []

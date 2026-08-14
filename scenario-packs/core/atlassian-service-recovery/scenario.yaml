@@ -1,0 +1,56 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: atlassian-service-recovery, title: Atlassian Jira and Confluence Recovery, version: 1.0.0, authors: [RedLab], tags: [rhel8, atlassian, jira, confluence, systemd, firewalld]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: collab01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [coreutils, systemd, firewalld, networking, web]}
+  briefing: {difficulty: advanced, duration: 75m, summary: Restore the internal Atlassian collaboration stack after configuration drift and a blocked application port., objectivesShownToParticipants: [Restore Jira, Restore Confluence, Restore both health endpoints, Preserve SELinux enforcing mode]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem:
+    templates: []
+    entries:
+      - {path: /opt/atlassian/jira/conf/server.xml, owner: root, group: root, mode: "0644", selinuxType: usr_t, append: "<Connector port=\"80800\" />\n"}
+      - {path: /opt/atlassian/confluence/conf/server.xml, owner: root, group: root, mode: "0644", selinuxType: usr_t, append: "<Connector port=\"80900\" />\n"}
+      - {path: /var/log/atlassian/application.log, owner: root, group: adm, mode: "0640", append: "application connector failed validation\n"}
+  packages: {installed: [{name: atlassian-jira, version: 8.20.12-1.el8}, {name: atlassian-confluence, version: 8.5.18-1.el8}, {name: firewalld, version: 1.3.4-9.el8}]}
+  services:
+    - name: jira.service
+      enabled: true
+      state: failed
+      startConditions: [{type: fileContains, path: /opt/atlassian/jira/conf/server.xml, pattern: 'port="8080"'}]
+      onFailure: {journal: [{priority: err, message: "Jira connector configuration is invalid"}]}
+    - name: confluence.service
+      enabled: true
+      state: failed
+      startConditions: [{type: fileContains, path: /opt/atlassian/confluence/conf/server.xml, pattern: 'port="8090"'}]
+      onFailure: {journal: [{priority: err, message: "Confluence connector configuration is invalid"}]}
+    - {name: firewalld.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}
+  network:
+    interfaces: [{name: ens192, state: up, addresses: [10.20.40.15/24]}]
+    dns: {servers: [10.20.40.10], records: {jira.example.test: 10.20.40.15, confluence.example.test: 10.20.40.15}}
+    firewall: {defaultZone: public, zones: {public: {interfaces: [ens192], services: [ssh]}}}
+    simulatedHosts: []
+  faults:
+    - {id: jira-connector-drift, descriptionForJudges: Jira is configured with an invalid application connector port, evidence: [/opt/atlassian/jira/conf/server.xml, journal:jira.service]}
+    - {id: confluence-connector-drift, descriptionForJudges: Confluence is configured with an invalid application connector port, evidence: [/opt/atlassian/confluence/conf/server.xml, journal:confluence.service]}
+    - {id: blocked-web-service, descriptionForJudges: The public firewall zone does not permit the collaboration web service, evidence: []}
+  rules:
+    - id: publish-atlassian-health
+      when: {all: [{type: serviceRunning, name: jira.service}, {type: serviceRunning, name: confluence.service}, {type: firewallServiceAllowed, zone: public, service: http}]}
+      effects:
+        - {type: setPort, address: 10.20.40.15, port: 8080, protocol: tcp, state: open}
+        - {type: setPort, address: 10.20.40.15, port: 8090, protocol: tcp, state: open}
+        - {type: setHttpResponse, url: http://jira.example.test/health, status: 200, body: "Jira OK\n"}
+        - {type: setHttpResponse, url: http://confluence.example.test/status, status: 200, body: "Confluence OK\n"}
+  objectives:
+    - {id: jira-running, title: Restore Jira, points: 20, checks: {type: serviceRunning, name: jira.service}}
+    - {id: confluence-running, title: Restore Confluence, points: 20, checks: {type: serviceRunning, name: confluence.service}}
+    - {id: jira-health, title: Restore the Jira health endpoint, points: 15, checks: {type: httpStatus, url: http://jira.example.test/health, status: 200}}
+    - {id: confluence-health, title: Restore the Confluence status endpoint, points: 15, checks: {type: httpStatus, url: http://confluence.example.test/status, status: 200}}
+    - {id: preserve-selinux, title: Preserve SELinux, points: 10, checks: {type: selinuxMode, value: enforcing}}
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -15, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-connectors, cost: 3, text: "Inspect both application connector files and their service journals before changing the firewall."}, {id: check-firewall, cost: 5, unlockAfter: 25m, text: "Confirm that the active zone permits the application protocol."}]
+  scoring: {automatedMaximum: 80, judgeMaximum: 0, completionBonus: 5, minimumPassingScore: 60}
+  referenceSolution: ["printf '<Connector port=\"8080\" />\\n' | sudo tee /opt/atlassian/jira/conf/server.xml", "printf '<Connector port=\"8090\" />\\n' | sudo tee /opt/atlassian/confluence/conf/server.xml", "sudo systemctl start jira.service", "sudo systemctl start confluence.service", "sudo firewall-cmd --add-service=http", "curl http://jira.example.test/health", "curl http://confluence.example.test/status"]
+  referenceSolutions:
+    - ["echo '<Connector port=\"8080\" />' | sudo tee /opt/atlassian/jira/conf/server.xml", "echo '<Connector port=\"8090\" />' | sudo tee /opt/atlassian/confluence/conf/server.xml", "sudo systemctl restart jira.service", "sudo systemctl restart confluence.service", "sudo firewall-cmd --zone=public --add-service=http", "curl http://confluence.example.test/status"]
+  judgeRubrics: []

@@ -10,6 +10,10 @@ spec:
     - {package: ../scenario-packs/core/network-outage, enabled: true}
     - {package: ../scenario-packs/core/compromised-account, enabled: true}
     - {package: ../scenario-packs/core/package-configuration-drift, enabled: true}
+    - {package: ../scenario-packs/core/atlassian-service-recovery, enabled: true}
+    - {package: ../scenario-packs/core/gitlab-service-recovery, enabled: true}
+    - {package: ../scenario-packs/core/cascade-workflow-recovery, enabled: true}
+    - {package: ../scenario-packs/core/drupal-site-recovery, enabled: true}
   teams: {source: ./teams.csv, joinCodeMode: generated, maxMembers: 6}
   sessions: {assignment: organizer, allowRestart: true, maxRestarts: 1, idleTimeout: 30m, maxConcurrent: 40}
   scoring: {hintsEnabled: true, liveScoreVisible: false, tiebreakers: [fewerHints, earlierCompletion]}

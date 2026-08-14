@@ -1,0 +1,54 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: gitlab-service-recovery, title: GitLab Web and Runner Recovery, version: 1.0.0, authors: [RedLab], tags: [rhel8, gitlab, ci-cd, systemd, firewalld]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: git01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [coreutils, systemd, firewalld, networking, web, packages]}
+  briefing: {difficulty: advanced, duration: 75m, summary: Recover GitLab web access and CI runner registration after both endpoints drifted to an invalid hostname., objectivesShownToParticipants: [Repair GitLab external URL, Repair runner registration URL, Restore GitLab services, Verify the health endpoint]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem:
+    templates: []
+    entries:
+      - {path: /etc/gitlab/gitlab.rb, owner: root, group: root, mode: "0644", selinuxType: etc_t, append: "external_url 'http://gitlab.invalid.test'\n"}
+      - {path: /etc/gitlab-runner/config.toml, owner: root, group: root, mode: "0600", selinuxType: etc_t, append: "url = \"http://gitlab.invalid.test\"\n"}
+      - {path: /var/log/gitlab/application.log, owner: root, group: adm, mode: "0640", append: "runner registration endpoint unavailable\n"}
+  packages: {installed: [{name: gitlab-ee, version: 16.11.10-ee.0.el8}, {name: gitlab-runner, version: 17.1.0-1.el8}, {name: firewalld, version: 1.3.4-9.el8}]}
+  services:
+    - name: gitlab.service
+      enabled: true
+      state: failed
+      startConditions: [{type: fileContains, path: /etc/gitlab/gitlab.rb, pattern: "external_url 'http://gitlab.example.test'"}]
+      onFailure: {journal: [{priority: err, message: "GitLab external_url does not match the service name"}]}
+    - name: gitlab-runner.service
+      enabled: true
+      state: failed
+      startConditions: [{type: fileContains, path: /etc/gitlab-runner/config.toml, pattern: 'url = "http://gitlab.example.test"'}]
+      onFailure: {journal: [{priority: err, message: "GitLab Runner cannot reach the registration endpoint"}]}
+    - {name: firewalld.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}
+  network:
+    interfaces: [{name: ens192, state: up, addresses: [10.20.50.15/24]}]
+    dns: {servers: [10.20.50.10], records: {gitlab.example.test: 10.20.50.15}}
+    firewall: {defaultZone: public, zones: {public: {interfaces: [ens192], services: [ssh]}}}
+    simulatedHosts: []
+  faults:
+    - {id: gitlab-url-drift, descriptionForJudges: GitLab external_url points at an invalid hostname, evidence: [/etc/gitlab/gitlab.rb, journal:gitlab.service]}
+    - {id: runner-url-drift, descriptionForJudges: GitLab Runner registration URL points at an invalid hostname, evidence: [/etc/gitlab-runner/config.toml, journal:gitlab-runner.service]}
+    - {id: blocked-gitlab-http, descriptionForJudges: The public firewall zone does not permit the GitLab web service, evidence: []}
+  rules:
+    - id: publish-gitlab-health
+      when: {all: [{type: serviceRunning, name: gitlab.service}, {type: serviceRunning, name: gitlab-runner.service}, {type: firewallServiceAllowed, zone: public, service: http}]}
+      effects:
+        - {type: setPort, address: 10.20.50.15, port: 80, protocol: tcp, state: open}
+        - {type: setHttpResponse, url: http://gitlab.example.test/-/health, status: 200, body: "GitLab OK\n"}
+  objectives:
+    - {id: gitlab-config, title: Repair the GitLab external URL, points: 20, checks: {type: fileContains, path: /etc/gitlab/gitlab.rb, pattern: "external_url 'http://gitlab.example.test'"}}
+    - {id: runner-config, title: Repair the runner registration URL, points: 20, checks: {type: fileContains, path: /etc/gitlab-runner/config.toml, pattern: 'url = "http://gitlab.example.test"'}}
+    - {id: gitlab-running, title: Restore GitLab, points: 15, checks: {type: serviceRunning, name: gitlab.service}}
+    - {id: runner-running, title: Restore GitLab Runner, points: 15, checks: {type: serviceRunning, name: gitlab-runner.service}}
+    - {id: health-check, title: Verify the GitLab health endpoint, points: 10, checks: {type: httpStatus, url: http://gitlab.example.test/-/health, status: 200}}
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -15, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-gitlab-config, cost: 3, text: "Compare the configured hostnames with the virtual DNS record and inspect both service journals."}, {id: check-firewall, cost: 5, unlockAfter: 25m, text: "A healthy service is not reachable until the active firewall zone allows HTTP."}]
+  scoring: {automatedMaximum: 80, judgeMaximum: 0, completionBonus: 5, minimumPassingScore: 60}
+  referenceSolution: ["printf \"external_url 'http://gitlab.example.test'\\n\" | sudo tee /etc/gitlab/gitlab.rb", "printf 'url = \"http://gitlab.example.test\"\\n' | sudo tee /etc/gitlab-runner/config.toml", "sudo systemctl start gitlab.service", "sudo systemctl start gitlab-runner.service", "sudo firewall-cmd --add-service=http", "curl http://gitlab.example.test/-/health"]
+  referenceSolutions:
+    - ["echo \"external_url 'http://gitlab.example.test'\" | sudo tee /etc/gitlab/gitlab.rb", "echo 'url = \"http://gitlab.example.test\"' | sudo tee /etc/gitlab-runner/config.toml", "sudo systemctl restart gitlab.service", "sudo systemctl restart gitlab-runner.service", "sudo firewall-cmd --zone=public --add-service=http", "curl http://gitlab.example.test/-/health"]
+  judgeRubrics: []

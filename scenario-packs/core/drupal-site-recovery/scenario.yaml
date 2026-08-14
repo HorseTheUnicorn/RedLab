@@ -1,0 +1,44 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: drupal-site-recovery, title: Drupal Site Recovery, version: 1.0.0, authors: [RedLab], tags: [rhel8, drupal, php, httpd, systemd, firewalld]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: cms01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [coreutils, systemd, firewalld, networking, web, selinux]}
+  briefing: {difficulty: intermediate, duration: 60m, summary: Restore a Drupal CMS that refuses its configured host and is unreachable through the public zone., objectivesShownToParticipants: [Repair Drupal trusted hosts, Restore the Drupal service, Verify the login page, Preserve SELinux enforcing mode]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem:
+    templates: []
+    entries:
+      - {path: /etc/drupal/settings.php, owner: apache, group: apache, mode: "0644", selinuxType: httpd_sys_content_t, append: "trusted_host_patterns = broken.example.test\n"}
+      - {path: /var/log/httpd/drupal-error.log, owner: root, group: adm, mode: "0640", append: "Untrusted host header rejected\n"}
+  packages: {installed: [{name: drupal, version: 10.3.1-1.el8}, {name: php-fpm, version: 8.0.30-1.el8}, {name: httpd, version: 2.4.37-65.el8}, {name: firewalld, version: 1.3.4-9.el8}]}
+  services:
+    - name: drupal.service
+      enabled: true
+      state: failed
+      startConditions: [{type: fileContains, path: /etc/drupal/settings.php, pattern: 'trusted_host_patterns = drupal.example.test'}]
+      onFailure: {journal: [{priority: err, message: "Drupal trusted host configuration rejected the site hostname"}]}
+    - {name: firewalld.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}
+  network:
+    interfaces: [{name: ens192, state: up, addresses: [10.20.70.15/24]}]
+    dns: {servers: [10.20.70.10], records: {drupal.example.test: 10.20.70.15}}
+    firewall: {defaultZone: public, zones: {public: {interfaces: [ens192], services: [ssh]}}}
+    simulatedHosts: []
+  faults: [{id: trusted-host-drift, descriptionForJudges: Drupal rejects the expected site hostname, evidence: [/etc/drupal/settings.php, /var/log/httpd/drupal-error.log, journal:drupal.service]}, {id: blocked-cms-http, descriptionForJudges: The public firewall zone does not permit the Drupal site, evidence: []}]
+  rules:
+    - id: publish-drupal-health
+      when: {all: [{type: serviceRunning, name: drupal.service}, {type: firewallServiceAllowed, zone: public, service: http}]}
+      effects:
+        - {type: setPort, address: 10.20.70.15, port: 80, protocol: tcp, state: open}
+        - {type: setHttpResponse, url: http://drupal.example.test/user/login, status: 200, body: "Drupal login\n"}
+  objectives:
+    - {id: trusted-host, title: Repair Drupal trusted hosts, points: 25, checks: {type: fileContains, path: /etc/drupal/settings.php, pattern: 'trusted_host_patterns = drupal.example.test'}}
+    - {id: drupal-running, title: Restore the Drupal service, points: 25, checks: {type: serviceRunning, name: drupal.service}}
+    - {id: login-health, title: Verify the Drupal login page, points: 20, checks: {type: httpStatus, url: http://drupal.example.test/user/login, status: 200}}
+    - {id: preserve-selinux, title: Preserve SELinux, points: 10, checks: {type: selinuxMode, value: enforcing}}
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -15, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-drupal-config, cost: 3, text: "Inspect the Drupal settings and web error log before changing SELinux or the firewall."}, {id: check-firewall, cost: 5, unlockAfter: 20m, text: "Confirm that the active zone allows HTTP after the service is healthy."}]
+  scoring: {automatedMaximum: 80, judgeMaximum: 0, completionBonus: 5, minimumPassingScore: 60}
+  referenceSolution: ["printf 'trusted_host_patterns = drupal.example.test\\n' | sudo tee /etc/drupal/settings.php", "sudo systemctl start drupal.service", "sudo firewall-cmd --add-service=http", "curl http://drupal.example.test/user/login"]
+  referenceSolutions:
+    - ["echo 'trusted_host_patterns = drupal.example.test' | sudo tee /etc/drupal/settings.php", "sudo systemctl restart drupal.service", "sudo firewall-cmd --zone=public --add-service=http", "curl http://drupal.example.test/user/login"]
+  judgeRubrics: []
