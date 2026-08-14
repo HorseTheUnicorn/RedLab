@@ -33,7 +33,7 @@ The first-party scenario packs are embedded in every binary, so participants can
 
 ## Screenshots
 
-The organizer panel is served by the local RedLab process and has no external web-service dependency. These captures show the year-2000-style control panel, its scenario workshop, and the participant link-token controls. The token is intentionally hidden in the documentation capture; the real token is displayed once when it is generated or rotated.
+The organizer panel is served by the local RedLab process and has no external web-service dependency. These captures show the control panel, its scenario workshop, and the participant link-token controls. The token is intentionally hidden in the documentation capture; the real token is displayed once when it is generated or rotated.
 
 ![RedLab organizer dashboard overview](docs/images/dashboard-overview.jpg)
 
