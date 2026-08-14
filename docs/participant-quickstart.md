@@ -14,6 +14,6 @@ For an optional coordinated remote event, connect to the organizer backend:
 redlab join https://organizer:8443 --team TEAM-1 --join-code CODE --trust-fingerprint FINGERPRINT
 ```
 
-Inside the terminal, begin with `lab briefing`, `id`, `systemctl status <unit>`, `journalctl`, and the relevant inspection commands. Use `lab check` to re-evaluate state, `lab note` and `lab answer` to preserve your explanation, then `lab evidence` and `lab submit`.
+Inside the terminal, begin with `lab briefing`, `pwd`, `ls -la`, `id`, `uname -a`, `systemctl status <unit>`, `journalctl`, and the relevant inspection commands. The virtual host has the usual RHEL-style paths, so you can explore `/etc`, `/home`, `/proc`, `/run`, `/usr`, and `/var` with `cd`, `find`, `tree`, and related commands. Use `lab check` to re-evaluate state, `lab note` and `lab answer` to preserve your explanation, then `lab evidence` and `lab submit`.
 
 All paths, processes, network hosts, and time shown by the terminal are virtual scenario state. Participant commands never execute on the participant's host.

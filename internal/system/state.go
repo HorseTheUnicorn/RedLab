@@ -103,28 +103,29 @@ type Process struct {
 }
 
 type State struct {
-	mu          sync.RWMutex
-	Hostname    string              `json:"hostname"`
-	Clock       time.Time           `json:"clock"`
-	Files       map[string]File     `json:"files"`
-	Users       map[string]User     `json:"users"`
-	SudoRules   []scenario.SudoRule `json:"sudoRules"`
-	Services    map[string]Service  `json:"services"`
-	Processes   []Process           `json:"processes"`
-	Journal     []JournalEntry      `json:"journal"`
-	Network     Network             `json:"network"`
-	SELinux     SELinux             `json:"selinux"`
-	Packages    map[string]Package  `json:"packages"`
-	Env         map[string]string   `json:"env"`
-	CurrentUser string              `json:"currentUser"`
-	CWD         string              `json:"cwd"`
-	Initial     *State              `json:"-"`
+	mu           sync.RWMutex
+	Hostname     string              `json:"hostname"`
+	Clock        time.Time           `json:"clock"`
+	Files        map[string]File     `json:"files"`
+	Users        map[string]User     `json:"users"`
+	SudoRules    []scenario.SudoRule `json:"sudoRules"`
+	Services     map[string]Service  `json:"services"`
+	Processes    []Process           `json:"processes"`
+	Journal      []JournalEntry      `json:"journal"`
+	Network      Network             `json:"network"`
+	SELinux      SELinux             `json:"selinux"`
+	Packages     map[string]Package  `json:"packages"`
+	Env          map[string]string   `json:"env"`
+	CurrentUser  string              `json:"currentUser"`
+	CWD          string              `json:"cwd"`
+	Architecture string              `json:"architecture"`
+	Initial      *State              `json:"-"`
 }
 
 func NewState(pkg scenario.Package, seed time.Time) (*State, error) {
 	s := &State{
-		Hostname: pkg.Scenario.Spec.RHEL.Hostname,
-		Clock:    seed.UTC(), Files: map[string]File{"/": {Path: "/", Owner: "root", Group: "root", Mode: 0755, Directory: true}},
+		Hostname: pkg.Scenario.Spec.RHEL.Hostname, Architecture: defaultString(pkg.Scenario.Spec.RHEL.Architecture, "x86_64"),
+		Clock: seed.UTC(), Files: map[string]File{"/": {Path: "/", Owner: "root", Group: "root", Mode: 0755, Directory: true}},
 		Users: map[string]User{}, Services: map[string]Service{}, Packages: map[string]Package{}, Env: map[string]string{}, CWD: "/",
 		Network: Network{DNS: pkg.Scenario.Spec.Network.DNS, DefaultZone: pkg.Scenario.Spec.Network.Firewall.DefaultZone, Zones: map[string]FirewallZone{}, OpenPorts: map[string]bool{}, HTTP: map[string]HTTPResponse{}},
 		SELinux: SELinux{Mode: pkg.Scenario.Spec.RHEL.SELinux, Booleans: map[string]bool{}},
@@ -151,6 +152,16 @@ func NewState(pkg scenario.Package, seed time.Time) (*State, error) {
 	if s.CurrentUser == "" {
 		s.CurrentUser = "root"
 	}
+	s.installRHELBase(pkg.Scenario.Spec)
+	s.CWD = userHome(s.CurrentUser)
+	current := s.Users[s.CurrentUser]
+	s.Env = map[string]string{
+		"HOME": userHome(s.CurrentUser), "USER": s.CurrentUser, "LOGNAME": s.CurrentUser,
+		"SHELL": defaultString(current.Shell, "/bin/bash"), "PWD": s.CWD,
+		"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"LANG": "en_US.UTF-8", "HOSTNAME": s.Hostname,
+	}
+	scenarioEntries := make(map[string]bool, len(pkg.Scenario.Spec.Filesystem.Entries))
 	for _, file := range pkg.Scenario.Spec.Filesystem.Entries {
 		p, err := NormalizePath(file.Path, "/")
 		if err != nil {
@@ -160,7 +171,9 @@ func NewState(pkg scenario.Package, seed time.Time) (*State, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
+		s.ensureParents(p)
 		s.Files[p] = File{Path: p, Content: file.Append, Owner: defaultString(file.Owner, "root"), Group: defaultString(file.Group, "root"), Mode: mode, SELinuxType: file.SELinuxType}
+		scenarioEntries[p] = true
 	}
 	for name, data := range pkg.Files {
 		if !strings.HasPrefix(name, "files/") {
@@ -170,7 +183,7 @@ func NewState(pkg scenario.Package, seed time.Time) (*State, error) {
 		if virtual == "/" {
 			continue
 		}
-		if _, exists := s.Files[virtual]; exists {
+		if scenarioEntries[virtual] {
 			continue
 		}
 		s.ensureParents(virtual)
@@ -214,7 +227,7 @@ func (s *State) cloneUnlocked() *State {
 		SudoRules: append([]scenario.SudoRule(nil), s.SudoRules...),
 		Services:  nil, Journal: nil, Network: s.Network, SELinux: s.SELinux,
 		Processes: append([]Process(nil), s.Processes...),
-		Packages:  nil, Env: nil, CurrentUser: s.CurrentUser, CWD: s.CWD,
+		Packages:  nil, Env: nil, CurrentUser: s.CurrentUser, CWD: s.CWD, Architecture: s.Architecture,
 	}
 	copyState.Files = map[string]File{}
 	for k, v := range s.Files {
@@ -297,6 +310,7 @@ func (s *State) Reset() error {
 	s.Env = initial.Env
 	s.CurrentUser = initial.CurrentUser
 	s.CWD = initial.CWD
+	s.Architecture = initial.Architecture
 	s.Initial = initial.Initial
 	return nil
 }
@@ -397,6 +411,38 @@ func (s *State) MakeDir(filename, user string) error {
 	s.Files[p] = File{Path: p, Owner: user, Group: s.primaryGroupLocked(user), Mode: 0755, Directory: true}
 	return nil
 }
+
+func (s *State) MakeDirAll(filename, user string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, err := NormalizePath(filename, s.CWD)
+	if err != nil {
+		return err
+	}
+	if existing, ok := s.Files[p]; ok {
+		if existing.Directory {
+			return nil
+		}
+		return fmt.Errorf("%s: File exists", filename)
+	}
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	current := ""
+	for _, part := range parts {
+		current += "/" + part
+		if existing, ok := s.Files[current]; ok {
+			if !existing.Directory {
+				return fmt.Errorf("%s: Not a directory", current)
+			}
+			continue
+		}
+		parent := s.Files[path.Dir(current)]
+		if !s.canWriteLocked(parent, user) {
+			return fmt.Errorf("%s: Permission denied", current)
+		}
+		s.Files[current] = File{Path: current, Owner: user, Group: s.primaryGroupLocked(user), Mode: 0755, Directory: true}
+	}
+	return nil
+}
 func (s *State) Touch(filename, user string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -425,6 +471,9 @@ func (s *State) Remove(filename, user string) error {
 	file, ok := s.Files[p]
 	if !ok {
 		return fmt.Errorf("%s: No such file or directory", filename)
+	}
+	if p == "/" {
+		return errors.New("cannot remove the virtual root")
 	}
 	if !s.canWriteLocked(s.Files[path.Dir(p)], user) {
 		return fmt.Errorf("%s: Permission denied", filename)
@@ -877,6 +926,7 @@ func (s *State) AddUserToGroup(user, group, actor string) error {
 	}
 	u.Groups = append(u.Groups, group)
 	s.Users[user] = u
+	s.syncIdentityFilesLocked()
 	return nil
 }
 
@@ -899,6 +949,11 @@ func (s *State) AddUser(name, actor string) error {
 		}
 	}
 	s.Users[name] = User{Name: name, UID: uid, GID: uid, Groups: []string{name}, Shell: "/bin/bash"}
+	home := userHome(name)
+	s.Files[home] = File{Path: home, Owner: name, Group: name, Mode: 0750, Directory: true, SELinuxType: "user_home_dir_t"}
+	s.Files[home+"/.bash_profile"] = File{Path: home + "/.bash_profile", Content: "# .bash_profile\nif [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n", Owner: name, Group: name, Mode: 0644, SELinuxType: "user_home_t"}
+	s.Files[home+"/.bashrc"] = File{Path: home + "/.bashrc", Content: "# .bashrc\nif [ -f /etc/bashrc ]; then . /etc/bashrc; fi\n", Owner: name, Group: name, Mode: 0644, SELinuxType: "user_home_t"}
+	s.syncIdentityFilesLocked()
 	return nil
 }
 

@@ -4,6 +4,8 @@
 
 RedLab emulates selected RHEL 8 behavior. The virtual filesystem, users, services, clock, network, firewall, packages, and SELinux state are ordinary Go data structures. Participant commands receive interfaces to those structures and cannot call `os/exec`, inspect host process state, read the host environment, or open outbound sockets.
 
+Every session begins with a deterministic minimal RHEL-like base tree. It includes conventional system directories, user homes, configuration files, proc-style inspection files, and log locations generated from scenario identity and network state. Scenario-declared entries and packaged `files/` content are then layered over that base, with explicit YAML entries taking final precedence. This provides free-form filesystem exploration without mapping a single virtual path to the host filesystem.
+
 The organizer backend may use the host filesystem for event configuration, immutable scenario packages, SQLite persistence, and exported reports. That host access is outside the participant command path and is constrained by package validation and path-safe readers.
 
 ## Components

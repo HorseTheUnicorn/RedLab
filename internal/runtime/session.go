@@ -406,6 +406,13 @@ func expand(word string, env *command.Env) string {
 		}
 		return "/root"
 	}
+	if strings.HasPrefix(word, "~/") {
+		home := env.Variables["HOME"]
+		if home == "" {
+			home = "/root"
+		}
+		return home + strings.TrimPrefix(word, "~")
+	}
 	var b strings.Builder
 	for i := 0; i < len(word); {
 		if word[i] != '$' {

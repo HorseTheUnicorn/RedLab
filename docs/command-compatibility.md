@@ -11,12 +11,12 @@ The initial vertical slice is intentionally small and safe. The catalog grows by
 
 | Pack | Commands | Level |
 | --- | --- | --- |
-| shell | `cd`, `pwd`, `echo`, `printf`, `date`, `which`, `type`, `export`, `unset`, `env`, `true`, `false`, `test`, `wc`, `sort`, `uniq`, `cut`, `history` | A/B |
-| files | `ls`, `cat`, `head`, `tail`, `grep`, `stat`, `mkdir`, `touch`, `rm`, `chmod`, `chown`, `cp`, `mv`, `rmdir`, `find` | A/B |
+| shell | `cd`, `pwd`, `echo`, `printf`, `date`, `uname`, `which`, `type`, `export`, `unset`, `env`, `true`, `false`, `test`, `wc`, `sort`, `uniq`, `cut`, `history` | A/B |
+| files | `ls`, `cat`, `head`, `tail`, `grep`, `stat`, `mkdir`, `touch`, `rm`, `chmod`, `chown`, `cp`, `mv`, `rmdir`, `find`, `tree`, `realpath`, `basename`, `dirname` | A/B |
 | identity | `whoami`, `id`, `groups`, `sudo`, `usermod`, `useradd` | A/B |
 | systemd | `systemctl`, `journalctl`, `logger` | A |
 | networking | `ip`, `ss`, `ping`, `dig`, `curl`, `firewall-cmd`, `hostname`, `host`, `nslookup` | A/B |
-| packages/processes/storage | `rpm`, `dnf`, `ps`, `df` | A/B |
+| packages/processes/storage | `rpm`, `dnf`, `ps`, `df`, `du`, `free`, `uptime` | A/B |
 | selinux | `getenforce`, `setenforce`, `sestatus`, `restorecon` | A |
 | lab | `lab briefing`, `lab objectives`, `lab status`, `lab hint`, `lab note`, `lab answer`, `lab check`, `lab evidence`, `lab reset`, `lab submit` | A |
 

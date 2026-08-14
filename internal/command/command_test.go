@@ -87,3 +87,39 @@ func TestShellHelpAndCompatibilityInfoAreDeterministic(t *testing.T) {
 		t.Fatalf("alias = %+v", result)
 	}
 }
+
+func TestRHELLikeNavigationAndInspectionCommands(t *testing.T) {
+	pkg := scenario.Package{Scenario: scenario.Scenario{Spec: scenario.ScenarioSpec{
+		RHEL:   scenario.RHELSpec{Major: 8, MinorProfile: "8.10", Hostname: "admin01.example.test", Architecture: "x86_64", SELinux: "enforcing"},
+		Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000, GID: 1000, Groups: []string{"wheel"}, Shell: "/bin/bash"}}},
+	}}, Files: map[string][]byte{}}
+	state, err := system.NewState(pkg, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	RegisterCore(registry)
+	env := &Env{State: state, User: "trainee", CWD: state.CWD, Variables: state.Env}
+
+	if result := registry.Run("ls", env, []string{"/"}, ""); result.ExitCode != 0 || !strings.Contains(result.Stdout, "etc\n") || !strings.Contains(result.Stdout, "proc\n") || !strings.Contains(result.Stdout, "var\n") {
+		t.Fatalf("root listing = %+v", result)
+	}
+	if result := registry.Run("cd", env, []string{"/etc/systemd/system"}, ""); result.ExitCode != 0 || env.CWD != "/etc/systemd/system" || env.Variables["PWD"] != env.CWD {
+		t.Fatalf("cd result = %+v cwd=%q env=%v", result, env.CWD, env.Variables)
+	}
+	if result := registry.Run("cd", env, nil, ""); result.ExitCode != 0 || env.CWD != "/home/trainee" {
+		t.Fatalf("home cd result = %+v cwd=%q", result, env.CWD)
+	}
+	if result := registry.Run("mkdir", env, []string{"-p", "work/one/two"}, ""); result.ExitCode != 0 {
+		t.Fatalf("mkdir -p = %+v", result)
+	}
+	if result := registry.Run("realpath", env, []string{"work/one/../one/two"}, ""); result.Stdout != "/home/trainee/work/one/two\n" {
+		t.Fatalf("realpath = %+v", result)
+	}
+	if result := registry.Run("uname", env, []string{"-a"}, ""); result.ExitCode != 0 || !strings.Contains(result.Stdout, "admin01.example.test") || !strings.Contains(result.Stdout, "el8_10") {
+		t.Fatalf("uname = %+v", result)
+	}
+	if result := registry.Run("free", env, []string{"-m"}, ""); result.ExitCode != 0 || !strings.Contains(result.Stdout, "Mem:") {
+		t.Fatalf("free = %+v", result)
+	}
+}

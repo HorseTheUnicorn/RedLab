@@ -62,6 +62,10 @@ var entries = []Entry{
 	{Name: "mv", Pack: "files", Level: LevelA, Summary: "Move a virtual file or directory tree", Implemented: true},
 	{Name: "rmdir", Pack: "files", Level: LevelB, Summary: "Remove an empty virtual directory", Implemented: true},
 	{Name: "find", Pack: "files", Level: LevelB, Summary: "Find entries in the virtual filesystem", Implemented: true},
+	{Name: "basename", Pack: "files", Level: LevelA, Summary: "Strip directory components from a virtual path", Implemented: true},
+	{Name: "dirname", Pack: "files", Level: LevelA, Summary: "Strip the final component from a virtual path", Implemented: true},
+	{Name: "realpath", Pack: "files", Level: LevelB, Summary: "Resolve a canonical virtual path", Implemented: true},
+	{Name: "tree", Pack: "files", Level: LevelB, Summary: "Display a virtual directory tree", Implemented: true},
 	{Name: "whoami", Pack: "identity", Level: LevelA, Summary: "Print the virtual effective user", Implemented: true},
 	{Name: "id", Pack: "identity", Level: LevelA, Summary: "Print virtual identity information", Implemented: true},
 	{Name: "groups", Pack: "identity", Level: LevelA, Summary: "Print virtual group membership", Implemented: true},
@@ -94,6 +98,10 @@ var entries = []Entry{
 	{Name: "killall", Pack: "processes", Level: LevelB, Summary: "Signal virtual processes by name", Implemented: true},
 	{Name: "top", Pack: "processes", Level: LevelB, Summary: "Show a deterministic virtual process summary", Implemented: true},
 	{Name: "df", Pack: "storage", Level: LevelB, Summary: "Report deterministic virtual filesystem usage", Implemented: true},
+	{Name: "du", Pack: "storage", Level: LevelB, Summary: "Estimate virtual file space usage", Implemented: true},
+	{Name: "free", Pack: "processes", Level: LevelB, Summary: "Display deterministic virtual memory usage", Implemented: true},
+	{Name: "uptime", Pack: "processes", Level: LevelB, Summary: "Display deterministic virtual uptime and load", Implemented: true},
+	{Name: "uname", Pack: "shell", Level: LevelA, Summary: "Print virtual kernel information", Implemented: true},
 	{Name: "lab", Pack: "lab", Level: LevelA, Summary: "Inspect and submit lab work", Implemented: true},
 }
 

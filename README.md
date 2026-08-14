@@ -53,7 +53,7 @@ The organizer panel is served by the local RedLab process and has no external we
 
 ![RedLab participant link-token controls](docs/images/dashboard-link-token.jpg)
 
-Participants use the local console client rather than a host shell. Their commands run inside RedLab's bounded virtual RHEL environment:
+Participants use the local console client rather than a host shell. Their commands run inside RedLab's bounded virtual RHEL environment. Each session starts in the participant's home directory and includes a conventional RHEL 8-style hierarchy under `/etc`, `/home`, `/proc`, `/run`, `/sys`, `/usr`, and `/var`, so participants can navigate and investigate the host normally instead of following scenario-only paths:
 
 ![RedLab participant terminal](docs/images/participant-terminal.jpg)
 
@@ -237,6 +237,8 @@ Useful lab commands:
 | `lab submit` | Mark the session ready for export or organizer review. |
 
 Every path in that terminal is virtual. For example, writing `/etc/httpd/conf/httpd.conf` changes only the scenario state held by RedLab; it does not change the participant's real computer.
+
+The base image includes familiar files such as `/etc/os-release`, `/etc/passwd`, `/etc/group`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/fstab`, `/proc/cpuinfo`, `/proc/meminfo`, and standard log locations. Scenario packages overlay their files and faults onto that base. Common navigation and inspection operations include `cd`, `pwd`, `ls -la`, `find`, `tree`, `realpath`, `mkdir -p`, `cp -r`, `mv`, `rm -r`, `df`, `du`, `ps`, `free`, `uptime`, and `uname`. These commands inspect or mutate Go-owned virtual state only.
 
 ## 7. Verify and send a submission bundle
 
@@ -423,7 +425,7 @@ Use [`docs/authoring.md`](docs/authoring.md) for the complete schema and authori
 RedLab is designed to be safe for an untrusted participant command stream:
 
 - The virtual shell is parsed by `internal/shell`; it is not the host shell.
-- `internal/system` owns virtual files, services, identities, packages, network state, and time.
+- `internal/system` owns a populated RHEL-like virtual filesystem plus services, identities, processes, packages, network state, and time. Scenario content is layered over the standard base tree.
 - Participant command paths contain no host process execution, host environment forwarding, host network dialing, or host filesystem mapping.
 - Local serving is forced to loopback unless the organizer explicitly opts in with `--lan`; clients refuse plaintext remote joins and pin the event TLS certificate fingerprint.
 - Authentication fails closed if credentials are missing or invalid. New credentials use bcrypt, and successful use of a legacy credential upgrades it automatically.

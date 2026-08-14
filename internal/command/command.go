@@ -72,14 +72,28 @@ func RegisterCore(r *Registry) {
 	reg("clear", "shell", "Clear the virtual terminal", catalog.LevelA, func(_ *Env, _ []string, _ string) Result { return Result{Stdout: "\x1b[2J\x1b[H"} })
 	reg("exit", "shell", "Leave the bounded shell", catalog.LevelA, func(_ *Env, _ []string, _ string) Result { return Result{Stdout: "logout\n"} })
 	reg("cd", "shell", "Change the virtual working directory", catalog.LevelA, func(e *Env, a []string, in string) Result {
-		target := "/"
+		target := e.Variables["HOME"]
+		printTarget := false
 		if len(a) > 0 {
 			target = a[0]
 		}
+		if target == "-" {
+			target = e.Variables["OLDPWD"]
+			printTarget = true
+			if target == "" {
+				return Result{ExitCode: 1, Stderr: "cd: OLDPWD not set\n"}
+			}
+		}
+		old := e.CWD
 		if err := e.State.SetCWD(target); err != nil {
 			return Result{ExitCode: 1, Stderr: err.Error() + "\n"}
 		}
 		e.CWD = e.State.CWD
+		e.Variables["OLDPWD"] = old
+		e.Variables["PWD"] = e.CWD
+		if printTarget {
+			return Result{Stdout: e.CWD + "\n"}
+		}
 		return Result{}
 	})
 	reg("echo", "shell", "Write arguments", catalog.LevelA, func(e *Env, a []string, in string) Result { return Result{Stdout: strings.Join(a, " ") + "\n"} })
@@ -139,6 +153,10 @@ func RegisterCore(r *Registry) {
 	reg("mv", "files", "Move a virtual file", catalog.LevelA, runMove)
 	reg("rmdir", "files", "Remove an empty virtual directory", catalog.LevelB, runRmdir)
 	reg("find", "files", "Find entries in the virtual filesystem", catalog.LevelB, runFind)
+	reg("basename", "files", "Strip directory components from a virtual path", catalog.LevelA, runBaseName)
+	reg("dirname", "files", "Strip the final component from a virtual path", catalog.LevelA, runDirName)
+	reg("realpath", "files", "Resolve a canonical virtual path", catalog.LevelB, runRealPath)
+	reg("tree", "files", "Display a virtual directory tree", catalog.LevelB, runTree)
 	reg("whoami", "identity", "Print effective user", catalog.LevelA, func(e *Env, _ []string, _ string) Result { return Result{Stdout: e.User + "\n"} })
 	reg("id", "identity", "Print virtual identity", catalog.LevelA, runID)
 	reg("groups", "identity", "Print group membership", catalog.LevelA, runGroups)
@@ -171,6 +189,10 @@ func RegisterCore(r *Registry) {
 	reg("killall", "processes", "Signal virtual processes by name", catalog.LevelB, runKillAll)
 	reg("top", "processes", "Show a deterministic virtual process summary", catalog.LevelB, runTop)
 	reg("df", "storage", "Report deterministic virtual filesystem usage", catalog.LevelB, runDF)
+	reg("du", "storage", "Estimate virtual file space usage", catalog.LevelB, runDU)
+	reg("free", "processes", "Display deterministic virtual memory usage", catalog.LevelB, runFree)
+	reg("uptime", "processes", "Display deterministic virtual uptime and load", catalog.LevelB, runUptime)
+	reg("uname", "shell", "Print virtual kernel information", catalog.LevelA, runUname)
 	reg("history", "shell", "Print command history", catalog.LevelA, func(e *Env, _ []string, _ string) Result {
 		var b strings.Builder
 		for i, h := range e.History {
@@ -389,11 +411,14 @@ func runTest(e *Env, a []string, _ string) Result {
 }
 func runLS(e *Env, a []string, _ string) Result {
 	target := "."
-	long := false
+	long, all := false, false
 	for _, v := range a {
 		if strings.HasPrefix(v, "-") {
 			if strings.Contains(v, "l") {
 				long = true
+			}
+			if strings.Contains(v, "a") {
+				all = true
 			}
 		} else {
 			target = v
@@ -405,6 +430,9 @@ func runLS(e *Env, a []string, _ string) Result {
 	}
 	var b strings.Builder
 	for _, file := range files {
+		if !all && strings.HasPrefix(pathBase(file.Path), ".") {
+			continue
+		}
 		if long {
 			fmt.Fprintf(&b, "%c%s %s %s %d %s\n", dirChar(file), formatMode(file.Mode, file.Directory), file.Owner, file.Group, len(file.Content), pathBase(file.Path))
 		} else {
@@ -523,12 +551,30 @@ func runMkdir(e *Env, a []string, _ string) Result {
 	if len(a) == 0 {
 		return Result{ExitCode: 1, Stderr: "mkdir: missing operand\n"}
 	}
-	for _, name := range a {
-		if err := e.State.MakeDir(name, e.User); err != nil {
+	parents := false
+	operands := make([]string, 0, len(a))
+	for _, arg := range a {
+		if arg == "-p" || arg == "--parents" {
+			parents = true
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	if len(operands) == 0 {
+		return Result{ExitCode: 1, Stderr: "mkdir: missing operand\n"}
+	}
+	for _, name := range operands {
+		var err error
+		if parents {
+			err = e.State.MakeDirAll(name, e.User)
+		} else {
+			err = e.State.MakeDir(name, e.User)
+		}
+		if err != nil {
 			return Result{ExitCode: 1, Stderr: "mkdir: " + err.Error() + "\n"}
 		}
 	}
-	return Result{Mutations: append([]string(nil), a...)}
+	return Result{Mutations: append([]string(nil), operands...)}
 }
 func runTouch(e *Env, a []string, _ string) Result {
 	if len(a) == 0 {
@@ -546,8 +592,17 @@ func runRM(e *Env, a []string, _ string) Result {
 		return Result{ExitCode: 1, Stderr: "rm: missing operand\n"}
 	}
 	operands := make([]string, 0, len(a))
+	recursive, force := false, false
 	for _, name := range a {
 		if name == "-f" || name == "--force" {
+			force = true
+			continue
+		}
+		if name == "-r" || name == "-R" || name == "--recursive" || name == "-rf" || name == "-fr" {
+			recursive = true
+			if strings.Contains(name, "f") {
+				force = true
+			}
 			continue
 		}
 		operands = append(operands, name)
@@ -556,7 +611,17 @@ func runRM(e *Env, a []string, _ string) Result {
 		return Result{ExitCode: 1, Stderr: "rm: missing operand\n"}
 	}
 	for _, name := range operands {
+		file, statErr := e.State.Stat(name)
+		if statErr != nil && force {
+			continue
+		}
+		if statErr == nil && file.Directory && !recursive {
+			return Result{ExitCode: 1, Stderr: "rm: cannot remove '" + name + "': Is a directory\n"}
+		}
 		if err := e.State.Remove(name, e.User); err != nil {
+			if force && strings.Contains(err.Error(), "No such file") {
+				continue
+			}
 			return Result{ExitCode: 1, Stderr: "rm: " + err.Error() + "\n"}
 		}
 	}
@@ -688,6 +753,67 @@ func runFind(e *Env, a []string, _ string) Result {
 		out.WriteString(file.Path + "\n")
 	}
 	return Result{Stdout: out.String()}
+}
+
+func runBaseName(_ *Env, args []string, _ string) Result {
+	if len(args) != 1 {
+		return Result{ExitCode: 1, Stderr: "basename: missing operand\n"}
+	}
+	return Result{Stdout: path.Base(args[0]) + "\n"}
+}
+
+func runDirName(_ *Env, args []string, _ string) Result {
+	if len(args) != 1 {
+		return Result{ExitCode: 1, Stderr: "dirname: missing operand\n"}
+	}
+	return Result{Stdout: path.Dir(args[0]) + "\n"}
+}
+
+func runRealPath(e *Env, args []string, _ string) Result {
+	if len(args) != 1 {
+		return Result{ExitCode: 1, Stderr: "realpath: missing operand\n"}
+	}
+	resolved, err := system.NormalizePath(args[0], e.CWD)
+	if err != nil {
+		return Result{ExitCode: 1, Stderr: "realpath: " + err.Error() + "\n"}
+	}
+	if _, err := e.State.Stat(resolved); err != nil {
+		return Result{ExitCode: 1, Stderr: "realpath: " + err.Error() + "\n"}
+	}
+	return Result{Stdout: resolved + "\n"}
+}
+
+func runTree(e *Env, args []string, _ string) Result {
+	root := "."
+	if len(args) > 0 {
+		root = args[len(args)-1]
+	}
+	resolved, err := system.NormalizePath(root, e.CWD)
+	if err != nil {
+		return Result{ExitCode: 1, Stderr: "tree: " + err.Error() + "\n"}
+	}
+	files, err := e.State.Walk(root, e.User)
+	if err != nil {
+		return Result{ExitCode: 1, Stderr: "tree: " + err.Error() + "\n"}
+	}
+	var b strings.Builder
+	b.WriteString(resolved + "\n")
+	directories, regular := 0, 0
+	for _, file := range files {
+		if file.Path == resolved {
+			continue
+		}
+		relative := strings.TrimPrefix(file.Path, strings.TrimSuffix(resolved, "/")+"/")
+		depth := strings.Count(relative, "/")
+		b.WriteString(strings.Repeat("    ", depth) + "|-- " + path.Base(file.Path) + "\n")
+		if file.Directory {
+			directories++
+		} else {
+			regular++
+		}
+	}
+	fmt.Fprintf(&b, "\n%d directories, %d files\n", directories, regular)
+	return Result{Stdout: b.String()}
 }
 func runID(e *Env, _ []string, _ string) Result {
 	u, ok := e.State.Users[e.User]
@@ -1028,6 +1154,71 @@ func runDF(e *Env, _ []string, _ string) Result {
 		available = 0
 	}
 	return Result{Stdout: fmt.Sprintf("Filesystem     1024-blocks  Used Available Capacity Mounted on\nvirtual              %d %d %d %d%% /\n", totalBytes/1024, usedBlocks, available, usedBytes*100/totalBytes)}
+}
+
+func runDU(e *Env, args []string, _ string) Result {
+	target := "."
+	human := false
+	for _, arg := range args {
+		if arg == "-h" || arg == "-sh" || arg == "-hs" {
+			human = true
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			target = arg
+		}
+	}
+	files, err := e.State.Walk(target, e.User)
+	if err != nil {
+		return Result{ExitCode: 1, Stderr: "du: " + err.Error() + "\n"}
+	}
+	bytes := 0
+	for _, file := range files {
+		bytes += len(file.Content)
+	}
+	blocks := (bytes + 1023) / 1024
+	value := strconv.Itoa(blocks)
+	if human {
+		value = fmt.Sprintf("%dK", blocks)
+	}
+	return Result{Stdout: value + "\t" + target + "\n"}
+}
+
+func runFree(_ *Env, args []string, _ string) Result {
+	unit := "Ki"
+	if len(args) > 0 && (args[0] == "-m" || args[0] == "--mebi") {
+		unit = "Mi"
+	}
+	if unit == "Mi" {
+		return Result{Stdout: "               total        used        free      shared  buff/cache   available\nMem:            2048         320        1536          16         192        1728\nSwap:           1024           0        1024\n"}
+	}
+	return Result{Stdout: "               total        used        free      shared  buff/cache   available\nMem:         2097152      327680     1572864       16384      196608     1769472\nSwap:        1048576           0     1048576\n"}
+}
+
+func runUptime(e *Env, _ []string, _ string) Result {
+	return Result{Stdout: fmt.Sprintf(" %s up 1 day,  0:00,  1 user,  load average: 0.00, 0.01, 0.05\n", e.State.CurrentTime().Format("15:04:05"))}
+}
+
+func runUname(e *Env, args []string, _ string) Result {
+	architecture := e.State.Architecture
+	if architecture == "" {
+		architecture = "x86_64"
+	}
+	if len(args) == 0 {
+		return Result{Stdout: "Linux\n"}
+	}
+	switch args[0] {
+	case "-r", "--kernel-release":
+		return Result{Stdout: "4.18.0-553.el8_10." + architecture + "\n"}
+	case "-m", "--machine":
+		return Result{Stdout: architecture + "\n"}
+	case "-n", "--nodename":
+		return Result{Stdout: e.State.Hostname + "\n"}
+	case "-a", "--all":
+		return Result{Stdout: fmt.Sprintf("Linux %s 4.18.0-553.el8_10.%s #1 SMP %s %s %s GNU/Linux\n", e.State.Hostname, architecture, architecture, architecture, architecture)}
+	default:
+		return Result{ExitCode: 1, Stderr: "uname: unsupported option '" + args[0] + "'\n"}
+	}
 }
 
 func runIP(e *Env, a []string, _ string) Result {
