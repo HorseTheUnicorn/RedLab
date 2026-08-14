@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -13,6 +14,25 @@ import (
 //
 //go:embed scenario-packs/core/**
 var builtinScenarioFS embed.FS
+
+// BuiltinScenarioIDs returns the stable, sorted IDs embedded in this build.
+func BuiltinScenarioIDs() ([]string, error) {
+	entries, err := fs.ReadDir(builtinScenarioFS, "scenario-packs/core")
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			ids = append(ids, entry.Name())
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no built-in scenarios are embedded in this build")
+	}
+	return ids, nil
+}
 
 // BuiltinScenarioFiles returns a defensive copy of a first-party scenario
 // package. IDs may be written as broken-httpd, core/broken-httpd, or

@@ -31,6 +31,18 @@ chmod +x ./redlab-darwin-arm64   # use the file you downloaded
 
 The first-party scenario packs are embedded in every binary, so participants can start a built-in scenario without cloning the repository or downloading any additional package.
 
+On Windows, double-click `redlab-windows-amd64.exe` to open the interactive launcher. The window stays open and offers participant scenarios, the organizer dashboard, event setup, help, and exit. The first dashboard launch creates a private event workspace under `%APPDATA%\RedLab\event`, packages all embedded scenarios into it, prints the organizer recovery secret and team credentials once, starts RedLab on loopback, and opens the dashboard in the default browser. Save the organizer recovery secret—it is the dashboard password.
+
+The same launcher appears on macOS or Linux when the binary is run without command-line arguments:
+
+```powershell
+.\redlab-windows-amd64.exe
+```
+
+```bash
+./redlab-linux-amd64
+```
+
 ## Screenshots
 
 The organizer panel is served by the local RedLab process and has no external web-service dependency. These captures show the control panel, its scenario workshop, and the participant link-token controls. The token is intentionally hidden in the documentation capture; the real token is displayed once when it is generated or rotated.
@@ -279,10 +291,11 @@ This creates:
 - `event/teams.csv` — team IDs and display names.
 - `event/data/credentials.json` — hashed organizer and team credentials.
 - `event/data/` — event-owned runtime data and submissions.
+- `event/scenarios/*.rlab` — editable/exportable copies of every scenario embedded in the binary, including the Atlassian, GitLab, Cascade, and Drupal packs.
 
 The command prints an organizer recovery secret, an event link token, and the initial `TEAM-1` join code. Store those securely; do not put them in source control, chat transcripts, or the public repository. The link token is a shared bootstrap credential for RedLab clients; it does not replace the team ID or team join code.
 
-Edit `event/event.yaml` and add the scenario packages you want to use. Paths are resolved relative to `event.yaml`. From an event directory created in the repository root, entries can point to the built-in packs like this:
+All embedded scenario packages are enabled initially. Use the organizer dashboard to add, remove, edit, import, or export scenarios. You can also edit `event/event.yaml`; package paths are resolved relative to that file. A source checkout may additionally reference scenario directories directly, for example:
 
 ```yaml
 scenarios:
@@ -358,7 +371,7 @@ Run `go run ./cmd/redlab --help` or `go run ./cmd/redlab <command> --help` for f
 | `event validate <event.yaml>` | Validate the event and each enabled scenario package. |
 | `event teams generate <teams.csv>` | Create hashed credentials and a team CSV. |
 | `event backup <event.yaml> <destination.db>` | Make a SQLite event database backup. |
-| `serve --event <event.yaml>` | Run the optional organizer backend. |
+| `serve --event <event.yaml> [--open]` | Run the optional organizer backend; `--open` launches the loopback dashboard. |
 | `join <server-url>` | Join a remote event as a team. |
 | `status` | Inspect local or remote event/session status. |
 | `submissions list [directory]` | List verified submission bundles. |
@@ -427,6 +440,8 @@ The organizer server is intended for localhost, a trusted hackathon LAN, or a pr
 ## 14. Troubleshooting
 
 `go` or `git` is not recognized: install Git and Go, restart the terminal, and confirm `git --version` and `go version` work.
+
+The Windows executable flashes and closes when double-clicked: download the latest `redlab-windows-amd64.exe`. Current builds open an interactive launcher when started without arguments. Older builds only printed command help and exited; from PowerShell they can still be used with `.\redlab-windows-amd64.exe play broken-httpd`.
 
 Dependency download fails: run `go mod download` from the repository root while internet access is available, then retry the local commands.
 

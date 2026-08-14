@@ -43,7 +43,9 @@ func main() {
 }
 
 func newRoot() *cobra.Command {
-	root := &cobra.Command{Use: "redlab", Short: "Deterministic RHEL 8 hackathon emulator", SilenceUsage: true}
+	root := &cobra.Command{Use: "redlab", Short: "Deterministic RHEL 8 hackathon emulator", SilenceUsage: true, Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error {
+		return runLauncher(os.Stdin, os.Stdout)
+	}}
 	root.AddCommand(newEventCommand(), newScenarioCommand(), newCatalogCommand(), newPlayCommand(), newServeCommand(), newJoinCommand(), newEvidenceCommand(), newStatusCommand(), newSubmissionsCommand(), newJudgeCommand(), newVersionCommand())
 	return root
 }
@@ -333,14 +335,40 @@ func eventBackup(_ *cobra.Command, args []string) error {
 	return nil
 }
 func eventInit(_ *cobra.Command, args []string) error {
-	root := args[0]
+	return initializeEvent(args[0], os.Stdout)
+}
+
+func initializeEvent(root string, out io.Writer) error {
+	if entries, err := os.ReadDir(root); err == nil {
+		if len(entries) > 0 {
+			return fmt.Errorf("refusing to initialize a non-empty event directory: %s", root)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(root, "scenarios"), 0700); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(root, "data"), 0700); err != nil {
 		return err
 	}
-	event := `apiVersion: redlab/v1
+	ids, err := redlab.BuiltinScenarioIDs()
+	if err != nil {
+		return err
+	}
+	var scenarioReferences strings.Builder
+	for _, id := range ids {
+		pkg, diagnostics := loadScenarioArgument("builtin:" + id)
+		if err := printDiagnostics(diagnostics); err != nil {
+			return err
+		}
+		archiveName := filepath.Join(root, "scenarios", id+".rlab")
+		if err := pkg.WriteArchiveFile(archiveName); err != nil {
+			return fmt.Errorf("package built-in scenario %s: %w", id, err)
+		}
+		fmt.Fprintf(&scenarioReferences, "    - package: ./scenarios/%s.rlab\n      enabled: true\n", id)
+	}
+	event := fmt.Sprintf(`apiVersion: redlab/v1
 kind: Event
 metadata:
   id: redlab-event
@@ -350,7 +378,8 @@ spec:
     timezone: UTC
     opensAt: 2026-01-01T09:00:00Z
     submissionsCloseAt: 2099-01-01T17:00:00Z
-  scenarios: []
+  scenarios:
+%s
   teams:
     source: ./teams.csv
     joinCodeMode: generated
@@ -375,7 +404,7 @@ spec:
     tls:
       mode: generated
     database: ./data/event.db
-`
+`, scenarioReferences.String())
 	if err := os.WriteFile(filepath.Join(root, "event.yaml"), []byte(event), 0600); err != nil {
 		return err
 	}
@@ -409,7 +438,7 @@ spec:
 	if err := os.WriteFile(filepath.Join(root, "teams.csv"), []byte("teamID,displayName\nTEAM-1,Practice Team\n"), 0600); err != nil {
 		return err
 	}
-	fmt.Printf("initialized event in %s\nOrganizer recovery secret: %s\nEvent link token: %s\nTEAM-1 join code: %s\n", root, organizerSecret, linkToken, teamCode)
+	fmt.Fprintf(out, "initialized event in %s\nOrganizer recovery secret: %s\nEvent link token: %s\nTEAM-1 join code: %s\n", root, organizerSecret, linkToken, teamCode)
 	return nil
 }
 func eventValidate(_ *cobra.Command, args []string) error {
@@ -793,31 +822,35 @@ func newCatalogCommand() *cobra.Command {
 func newPlayCommand() *cobra.Command {
 	var team, exportPath string
 	play := &cobra.Command{Use: "play <scenario>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
-		pkg, diagnostics := loadScenarioArgument(args[0])
-		if err := printDiagnostics(diagnostics); err != nil {
-			return err
-		}
-		session, err := runtime.NewSession("local", team, pkg, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-		if err != nil {
-			return err
-		}
-		if err := playLoop(os.Stdin, os.Stdout, session); err != nil {
-			return err
-		}
-		if exportPath != "" {
-			if !session.IsSubmitted() {
-				return errors.New("--export requires `lab submit` before exiting")
-			}
-			if err := session.ExportBundle(exportPath, "local-practice"); err != nil {
-				return err
-			}
-			fmt.Printf("exported local submission to %s\n", exportPath)
-		}
-		return nil
+		return playScenario(args[0], team, exportPath, os.Stdin, os.Stdout)
 	}}
 	play.Flags().StringVar(&team, "team", "PRACTICE", "team identifier")
 	play.Flags().StringVar(&exportPath, "export", "", "write a signed bundle after `lab submit`")
 	return play
+}
+
+func playScenario(argument, team, exportPath string, in io.Reader, out io.Writer) error {
+	pkg, diagnostics := loadScenarioArgument(argument)
+	if err := printDiagnostics(diagnostics); err != nil {
+		return err
+	}
+	session, err := runtime.NewSession("local", team, pkg, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		return err
+	}
+	if err := playLoop(in, out, session); err != nil {
+		return err
+	}
+	if exportPath != "" {
+		if !session.IsSubmitted() {
+			return errors.New("--export requires `lab submit` before exiting")
+		}
+		if err := session.ExportBundle(exportPath, "local-practice"); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "exported local submission to %s\n", exportPath)
+	}
+	return nil
 }
 
 func loadScenarioArgument(argument string) (scenario.Package, []scenario.Diagnostic) {
@@ -838,7 +871,7 @@ func loadScenarioArgument(argument string) (scenario.Package, []scenario.Diagnos
 
 func newServeCommand() *cobra.Command {
 	var eventFile, address string
-	var lan bool
+	var lan, openDashboard bool
 	serve := &cobra.Command{Use: "serve --event <event.yaml>", RunE: func(_ *cobra.Command, _ []string) error {
 		if eventFile == "" {
 			return errors.New("--event is required")
@@ -894,6 +927,9 @@ func newServeCommand() *cobra.Command {
 		} else if event.Spec.Server.TLS.Mode == "disabled" {
 			return errors.New("LAN mode requires TLS; configure generated or provided TLS")
 		}
+		if openDashboard && lan {
+			return errors.New("--open is available only for the local loopback dashboard")
+		}
 		app := server.New(eventFile, event, packages, storage)
 		if err := app.Recover(); err != nil {
 			return err
@@ -939,6 +975,14 @@ func newServeCommand() *cobra.Command {
 				errorsCh <- app.ListenAndServe(address)
 			}
 		}()
+		if openDashboard {
+			url := "http://" + address + "/"
+			go func() {
+				if err := openDashboardWhenReady(url); err != nil {
+					fmt.Fprintf(os.Stderr, "could not open dashboard automatically: %v\nOpen %s in your browser.\n", err, url)
+				}
+			}()
+		}
 		select {
 		case signal := <-stop:
 			_ = signal
@@ -953,8 +997,26 @@ func newServeCommand() *cobra.Command {
 	serve.Flags().StringVar(&eventFile, "event", "", "event YAML file")
 	serve.Flags().StringVar(&address, "addr", "", "listen address override")
 	serve.Flags().BoolVar(&lan, "lan", false, "explicitly opt into LAN binding")
+	serve.Flags().BoolVar(&openDashboard, "open", false, "open the local organizer dashboard in the default browser")
 	return serve
 }
+
+func openDashboardWhenReady(address string) error {
+	client := &http.Client{Timeout: 250 * time.Millisecond}
+	for attempt := 0; attempt < 40; attempt++ {
+		response, err := client.Get(strings.TrimRight(address, "/") + "/api/v1/healthz")
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return launchBrowser(address)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("dashboard did not become ready within four seconds")
+}
+
+var launchBrowser = openBrowserURL
 
 func newJoinCommand() *cobra.Command {
 	var teamID, joinCode, linkToken string
