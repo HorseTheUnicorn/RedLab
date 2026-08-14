@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://redlab.dev/schemas/event-v1.json",
+  "title": "RedLab Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "redlab/v1"},
+    "kind": {"const": "Event"},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "spec": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schedule", "scenarios", "teams", "sessions", "scoring", "reports", "server"],
+      "properties": {
+        "schedule": {"type": "object", "additionalProperties": false, "required": ["timezone", "opensAt", "submissionsCloseAt"], "properties": {"timezone": {"type": "string"}, "opensAt": {"type": "string", "format": "date-time"}, "submissionsCloseAt": {"type": "string", "format": "date-time"}}},
+        "scenarios": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["package", "enabled"], "properties": {"package": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"}, "enabled": {"type": "boolean"}}}},
+        "teams": {"$ref": "#/$defs/teams"},
+        "sessions": {"$ref": "#/$defs/sessions"},
+        "scoring": {"type": "object", "additionalProperties": false, "required": ["hintsEnabled", "liveScoreVisible", "tiebreakers"], "properties": {"hintsEnabled": {"type": "boolean"}, "liveScoreVisible": {"type": "boolean"}, "tiebreakers": {"type": "array", "items": {"type": "string"}}}},
+        "reports": {"type": "object", "additionalProperties": false, "required": ["formats", "includeTranscript", "includeStateDiff", "redactSecrets"], "properties": {"formats": {"type": "array", "items": {"enum": ["markdown", "json"]}}, "includeTranscript": {"type": "boolean"}, "includeStateDiff": {"type": "boolean"}, "redactSecrets": {"type": "boolean"}}},
+        "server": {"type": "object", "additionalProperties": false, "required": ["listen", "tls", "database"], "properties": {"listen": {"type": "string"}, "tls": {"type": "object", "additionalProperties": false, "required": ["mode"], "properties": {"mode": {"enum": ["generated", "provided", "disabled"]}, "certificate": {"type": "string"}, "key": {"type": "string"}}}, "database": {"type": "string"}}}
+      }
+    }
+  },
+  "$defs": {
+    "metadata": {"type": "object", "additionalProperties": false, "required": ["id", "title"], "properties": {"id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"}, "title": {"type": "string"}, "version": {"type": "string"}, "authors": {"type": "array", "items": {"type": "string"}}, "tags": {"type": "array", "items": {"type": "string"}}}},
+    "teams": {"type": "object", "additionalProperties": false, "required": ["source", "joinCodeMode", "maxMembers"], "properties": {"source": {"type": "string"}, "joinCodeMode": {"enum": ["generated", "provided"]}, "maxMembers": {"type": "integer", "minimum": 1}}},
+    "sessions": {"type": "object", "additionalProperties": false, "required": ["assignment", "allowRestart", "maxRestarts", "idleTimeout", "maxConcurrent"], "properties": {"assignment": {"enum": ["organizer", "round-robin", "random-seeded"]}, "allowRestart": {"type": "boolean"}, "maxRestarts": {"type": "integer", "minimum": 0}, "idleTimeout": {"type": "string", "pattern": "^[0-9]+(s|m|h)$"}, "maxConcurrent": {"type": "integer", "minimum": 1}}}
+  }
+}

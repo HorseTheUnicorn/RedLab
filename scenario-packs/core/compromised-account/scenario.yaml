@@ -1,0 +1,21 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: compromised-account, title: Compromised Account, version: 1.0.0, authors: [RedLab], tags: [rhel8, incident-response, ssh, audit]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: ir01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [identity, systemd, incident-response, selinux]}
+  briefing: {difficulty: advanced, duration: 75m, summary: Contain a simulated account compromise while preserving an evidence timeline., objectivesShownToParticipants: [Identify access, Contain persistence, Preserve evidence]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem: {templates: [], entries: [{path: /var/log/secure, owner: root, group: adm, mode: "0640", append: "sshd: Accepted publickey for trainee\n"}, {path: /etc/cron.d/maintenance, owner: root, group: root, mode: "0644", append: "# simulated persistence\n"}]}
+  packages: {installed: [{name: openssh-server, version: 8.0p1-24.el8}]}
+  services: [{name: sshd.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}]
+  network: {interfaces: [], dns: {servers: [], records: {}}, firewall: {defaultZone: public, zones: {}}, simulatedHosts: []}
+  faults: [{id: persistence, descriptionForJudges: Unauthorized persistence is present, evidence: [/etc/cron.d/maintenance, /var/log/secure]}]
+  rules: []
+  objectives: [{id: contain-persistence, title: Remove simulated persistence, points: 10, checks: {type: fileAbsent, path: /etc/cron.d/maintenance}}, {id: preserve-selinux, title: Preserve SELinux, points: 5, checks: {type: selinuxMode, value: enforcing}}]
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -10, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-auth, cost: 3, text: Establish a timeline from authentication and scheduled-task evidence.}]
+  scoring: {automatedMaximum: 15, judgeMaximum: 10, completionBonus: 0, minimumPassingScore: 9}
+  referenceSolution: ["sudo rm /etc/cron.d/maintenance"]
+  referenceSolutions:
+    - ["sudo rm -f /etc/cron.d/maintenance"]
+  judgeRubrics: []

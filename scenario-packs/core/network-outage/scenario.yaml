@@ -1,0 +1,21 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: network-outage, title: Network Outage, version: 1.0.0, authors: [RedLab], tags: [rhel8, networking, dns, firewall]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: net01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [networking, firewalld, systemd]}
+  briefing: {difficulty: intermediate, duration: 60m, summary: Restore application reachability through layered network diagnosis., objectivesShownToParticipants: [Verify link and address, Restore name resolution, Verify the application]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem: {templates: [], entries: [{path: /etc/resolv.conf, owner: root, group: root, mode: "0644", append: "nameserver 10.20.30.10\n"}]}
+  packages: {installed: [{name: NetworkManager, version: 1.40.16-1.el8}]}
+  services: [{name: NetworkManager.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}]
+  network: {interfaces: [{name: ens192, state: up, addresses: [10.20.30.15/24]}], dns: {servers: [10.20.30.10], records: {app.example.test: 10.20.30.15}}, firewall: {defaultZone: public, zones: {public: {interfaces: [ens192], services: [ssh]}}}, simulatedHosts: []}
+  faults: [{id: route-missing, descriptionForJudges: Application route is unavailable, evidence: [/etc/resolv.conf]}]
+  rules: []
+  objectives: [{id: allow-http, title: Allow application HTTP through the public zone, points: 10, checks: {type: firewallServiceAllowed, zone: public, service: http}}, {id: preserve-selinux, title: Preserve SELinux, points: 5, checks: {type: selinuxMode, value: enforcing}}]
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -10, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-network, cost: 3, text: "Check interface, route, DNS, and firewall layers separately."}]
+  scoring: {automatedMaximum: 15, judgeMaximum: 10, completionBonus: 0, minimumPassingScore: 9}
+  referenceSolution: ["sudo firewall-cmd --add-service=http"]
+  referenceSolutions:
+    - ["sudo firewall-cmd --zone=public --add-service=http"]
+  judgeRubrics: []

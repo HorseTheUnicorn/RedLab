@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://redlab.dev/schemas/scenario-v1.json",
+  "title": "RedLab Scenario v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "redlab/v1"},
+    "kind": {"const": "Scenario"},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "spec": {"type": "object", "additionalProperties": false, "required": ["rhel", "briefing", "actors", "filesystem", "packages", "services", "network", "rules", "objectives", "guardrails", "hints", "scoring", "judgeRubrics"], "properties": {
+      "rhel": {"type": "object", "additionalProperties": false, "required": ["major", "minorProfile", "hostname", "architecture", "selinux", "commandPacks"], "properties": {"major": {"const": 8}, "minorProfile": {"type": "string"}, "hostname": {"type": "string"}, "architecture": {"type": "string"}, "selinux": {"enum": ["enforcing", "permissive", "disabled"]}, "commandPacks": {"type": "array", "items": {"type": "string"}}}},
+      "briefing": {"type": "object", "additionalProperties": false, "required": ["difficulty", "duration", "summary", "objectivesShownToParticipants"], "properties": {"difficulty": {"type": "string"}, "duration": {"type": "string"}, "summary": {"type": "string"}, "objectivesShownToParticipants": {"type": "array", "items": {"type": "string"}}}},
+      "actors": {"type": "object", "additionalProperties": false, "required": ["initialUser", "users", "sudo"], "properties": {"initialUser": {"type": "string"}, "users": {"type": "array", "items": {"$ref": "#/$defs/user"}}, "sudo": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["subject", "commands", "requirePassword"], "properties": {"subject": {"type": "string"}, "commands": {"type": "array", "items": {"type": "string"}}, "requirePassword": {"type": "boolean"}}}}}},
+      "filesystem": {"type": "object", "additionalProperties": false, "required": ["templates", "entries"], "properties": {"templates": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["source", "target"], "properties": {"source": {"type": "string"}, "target": {"const": "/"}}}}, "entries": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "owner", "group", "mode"], "properties": {"path": {"type": "string", "pattern": "^/"}, "owner": {"type": "string"}, "group": {"type": "string"}, "mode": {"type": "string"}, "selinuxType": {"type": "string"}, "append": {"type": "string"}}}}}},
+      "packages": {"type": "object", "additionalProperties": false, "required": ["installed"], "properties": {"installed": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string"}, "version": {"type": "string"}}}}}},
+      "services": {"type": "array", "items": {"$ref": "#/$defs/service"}},
+      "network": {"type": "object"},
+      "faults": {"type": "array"}, "rules": {"type": "array"}, "objectives": {"type": "array"}, "guardrails": {"type": "array"}, "hints": {"type": "array"}, "scoring": {"type": "object"}, "referenceSolution": {"type": "array", "items": {"type": "string"}}, "referenceSolutions": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "judgeRubrics": {"type": "array"}
+    }}
+  },
+  "$defs": {
+    "metadata": {"type": "object", "additionalProperties": false, "required": ["id", "title", "version"], "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "version": {"type": "string"}, "authors": {"type": "array", "items": {"type": "string"}}, "tags": {"type": "array", "items": {"type": "string"}}}},
+    "user": {"type": "object", "additionalProperties": false, "required": ["name", "uid", "groups", "shell"], "properties": {"name": {"type": "string"}, "uid": {"type": "integer", "minimum": 0}, "gid": {"type": "integer", "minimum": 0}, "groups": {"type": "array", "items": {"type": "string"}}, "shell": {"type": "string"}, "password": {"type": "string"}}},
+    "service": {"type": "object", "additionalProperties": false, "required": ["name", "enabled", "state", "startConditions", "onFailure"], "properties": {"name": {"type": "string"}, "enabled": {"type": "boolean"}, "state": {"enum": ["running", "stopped", "failed"]}, "startConditions": {"type": "array"}, "onFailure": {"type": "object"}}}
+  }
+}

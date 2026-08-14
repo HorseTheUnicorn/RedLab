@@ -1,0 +1,74 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata:
+  id: broken-httpd
+  title: Customer Portal Outage
+  version: 1.0.0
+  authors: [RedLab]
+  tags: [rhel8, systemd, httpd, firewalld, selinux]
+spec:
+  rhel:
+    major: 8
+    minorProfile: "8.10"
+    hostname: app01.example.test
+    architecture: x86_64
+    selinux: enforcing
+    commandPacks: [coreutils, systemd, networking, firewalld, selinux, web]
+  briefing:
+    difficulty: intermediate
+    duration: 60m
+    summary: Restore the customer portal and identify both contributing faults.
+    objectivesShownToParticipants: [Restore httpd, Restore the health endpoint, Preserve SELinux enforcing mode]
+  actors:
+    initialUser: trainee
+    users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}]
+    sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]
+  filesystem:
+    templates: [{source: files/, target: /}]
+    entries:
+      - {path: /etc/httpd/conf/httpd.conf, owner: root, group: root, mode: "0644", selinuxType: httpd_config_t}
+      - {path: /var/log/httpd/error_log, owner: root, group: adm, mode: "0640", append: "[error] AH00526: Syntax error on line 42\n"}
+  packages:
+    installed: [{name: httpd, version: 2.4.37-65.el8}, {name: firewalld, version: 1.3.4-9.el8}]
+  services:
+    - name: httpd.service
+      enabled: true
+      state: failed
+      startConditions:
+        - {type: fileContains, path: /etc/httpd/conf/httpd.conf, pattern: "Listen 80"}
+        - {type: selinuxAllows, subject: httpd_t, object: httpd_sys_content_t, permission: read}
+      onFailure: {journal: [{priority: err, message: "httpd: configuration validation failed"}]}
+    - {name: firewalld.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}
+  network:
+    interfaces: [{name: ens192, state: up, addresses: [10.20.30.15/24]}]
+    dns: {servers: [10.20.30.10], records: {app01.example.test: 10.20.30.15}}
+    firewall: {defaultZone: public, zones: {public: {interfaces: [ens192], services: [ssh]}}}
+    simulatedHosts: []
+  faults:
+    - {id: invalid-listen-directive, descriptionForJudges: Invalid HTTP listen directive, evidence: [/etc/httpd/conf/httpd.conf, journal:httpd.service]}
+    - {id: blocked-http-service, descriptionForJudges: Public zone does not permit HTTP, evidence: []}
+  rules:
+    - id: publish-http-port
+      when: {all: [{type: serviceRunning, name: httpd.service}, {type: firewallServiceAllowed, zone: public, service: http}]}
+      effects:
+        - {type: setPort, address: 10.20.30.15, port: 80, protocol: tcp, state: open}
+        - {type: setHttpResponse, url: http://app01.example.test/health, status: 200, body: "ok\n"}
+  objectives:
+    - {id: httpd-running, title: Restore httpd, points: 25, checks: {type: serviceRunning, name: httpd.service}}
+    - {id: health-check, title: Restore the health endpoint, points: 25, checks: {type: httpStatus, url: http://app01.example.test/health, status: 200}}
+    - {id: keep-selinux-enforcing, title: Preserve mandatory access controls, points: 15, checks: {type: selinuxMode, value: enforcing}}
+    - {id: root-cause, title: Identify both contributing faults, points: 20, response: {type: judgeReviewedText, rubricId: root-cause-rubric}}
+  guardrails:
+    - {id: no-global-firewall-disable, severity: deduction, points: -10, when: {type: serviceDisabled, name: firewalld.service}}
+    - {id: no-selinux-disable, severity: deduction, points: -15, when: {type: selinuxModeIn, values: [permissive, disabled]}}
+  hints:
+    - {id: check-journal, cost: 3, text: Check the service journal before changing configuration.}
+    - {id: check-firewall, cost: 5, unlockAfter: 20m, text: Confirm that the active zone allows the application protocol.}
+  scoring: {automatedMaximum: 80, judgeMaximum: 20, completionBonus: 5, minimumPassingScore: 65}
+  referenceSolution: ["printf 'Listen 80\\n' | sudo tee /etc/httpd/conf/httpd.conf", "sudo systemctl start httpd.service", "sudo firewall-cmd --add-service=http", "curl http://app01.example.test/health"]
+  referenceSolutions:
+    - ["echo 'Listen 80' | sudo tee /etc/httpd/conf/httpd.conf", "sudo systemctl start httpd.service", "sudo firewall-cmd --zone=public --add-service=http", "curl http://app01.example.test/health"]
+  judgeRubrics:
+    - id: root-cause-rubric
+      maximum: 12
+      criteria: [{label: Identifies invalid HTTP configuration, points: 5}, {label: Identifies missing firewall permission, points: 5}, {label: Explains evidence, points: 2}]

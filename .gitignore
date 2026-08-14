@@ -1,0 +1,11 @@
+/bin/
+/dist/
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.rlab
+*.exe
+*.test
+*.out
+.DS_Store

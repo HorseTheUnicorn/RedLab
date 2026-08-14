@@ -1,0 +1,21 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: identity-sudo-failure, title: Identity and Sudo Failure, version: 1.0.0, authors: [RedLab], tags: [rhel8, identity, sudo]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: auth01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [coreutils, identity, systemd]}
+  briefing: {difficulty: beginner, duration: 45m, summary: Restore controlled administrative access and explain the authentication evidence., objectivesShownToParticipants: [Diagnose the account, Repair scoped access, Verify authorization]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [ops], shell: /bin/bash}], sudo: [{subject: trainee, commands: [ALL], requirePassword: true}]}
+  filesystem: {templates: [], entries: [{path: /var/log/secure, owner: root, group: adm, mode: "0640", append: "sudo: authentication failure\n"}]}
+  packages: {installed: [{name: sudo, version: 1.8.29-10.el8}]}
+  services: []
+  network: {interfaces: [], dns: {servers: [], records: {}}, firewall: {defaultZone: public, zones: {}}, simulatedHosts: []}
+  faults: [{id: account-access, descriptionForJudges: Administrative access is unavailable, evidence: [/var/log/secure]}]
+  rules: []
+  objectives: [{id: restore-wheel, title: Restore controlled wheel membership, points: 10, checks: {type: userInGroup, user: trainee, group: wheel}}, {id: preserve-selinux, title: Preserve SELinux, points: 5, checks: {type: selinuxMode, value: enforcing}}]
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -10, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-auth, cost: 3, text: Inspect authentication logs and identity state.}]
+  scoring: {automatedMaximum: 15, judgeMaximum: 10, completionBonus: 0, minimumPassingScore: 9}
+  referenceSolution: ["sudo usermod -aG wheel trainee"]
+  referenceSolutions:
+    - ["sudo usermod -G wheel trainee"]
+  judgeRubrics: []

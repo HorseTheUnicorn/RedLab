@@ -1,0 +1,17 @@
+apiVersion: redlab/v1
+kind: Event
+metadata: {id: redlab-core-practice, title: RedLab Core Practice}
+spec:
+  schedule: {timezone: UTC, opensAt: 2026-01-01T00:00:00Z, submissionsCloseAt: 2099-01-01T00:00:00Z}
+  scenarios:
+    - {package: ../scenario-packs/core/broken-httpd, enabled: true}
+    - {package: ../scenario-packs/core/disk-inode-exhaustion, enabled: true}
+    - {package: ../scenario-packs/core/identity-sudo-failure, enabled: true}
+    - {package: ../scenario-packs/core/network-outage, enabled: true}
+    - {package: ../scenario-packs/core/compromised-account, enabled: true}
+    - {package: ../scenario-packs/core/package-configuration-drift, enabled: true}
+  teams: {source: ./teams.csv, joinCodeMode: generated, maxMembers: 6}
+  sessions: {assignment: organizer, allowRestart: true, maxRestarts: 1, idleTimeout: 30m, maxConcurrent: 40}
+  scoring: {hintsEnabled: true, liveScoreVisible: false, tiebreakers: [fewerHints, earlierCompletion]}
+  reports: {formats: [markdown, json], includeTranscript: true, includeStateDiff: true, redactSecrets: true}
+  server: {listen: 127.0.0.1:8443, tls: {mode: generated}, database: ./data/event.db}

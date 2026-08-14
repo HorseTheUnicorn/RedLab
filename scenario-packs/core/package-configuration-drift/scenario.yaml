@@ -1,0 +1,21 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: package-configuration-drift, title: Package and Configuration Drift, version: 1.0.0, authors: [RedLab], tags: [rhel8, rpm, dnf, configuration]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: pkg01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [packages, systemd, coreutils]}
+  briefing: {difficulty: intermediate, duration: 60m, summary: Identify package and configuration drift and apply a scoped repair., objectivesShownToParticipants: [Verify package state, Repair configuration, Verify the service]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem: {templates: [], entries: [{path: /etc/app/app.conf, owner: root, group: root, mode: "0644", append: "setting=drifted\n"}]}
+  packages: {installed: [{name: app, version: 1.0.0-1.el8}]}
+  services: [{name: app.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}]
+  network: {interfaces: [], dns: {servers: [], records: {}}, firewall: {defaultZone: public, zones: {}}, simulatedHosts: []}
+  faults: [{id: configuration-drift, descriptionForJudges: Configuration differs from the expected package state, evidence: [/etc/app/app.conf]}]
+  rules: []
+  objectives: [{id: repair-config, title: Restore the expected application setting, points: 10, checks: {type: fileContains, path: /etc/app/app.conf, pattern: "setting=expected"}}, {id: preserve-selinux, title: Preserve SELinux, points: 5, checks: {type: selinuxMode, value: enforcing}}]
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -10, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: verify-package, cost: 3, text: Compare package ownership and configuration before repairing.}]
+  scoring: {automatedMaximum: 15, judgeMaximum: 10, completionBonus: 0, minimumPassingScore: 9}
+  referenceSolution: ["printf 'setting=expected\\n' | sudo tee /etc/app/app.conf"]
+  referenceSolutions:
+    - ["printf '%s\\n' setting=expected | sudo tee /etc/app/app.conf"]
+  judgeRubrics: []

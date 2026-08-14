@@ -1,0 +1,21 @@
+apiVersion: redlab/v1
+kind: Scenario
+metadata: {id: disk-inode-exhaustion, title: Disk and Inode Exhaustion, version: 1.0.0, authors: [RedLab], tags: [rhel8, storage, logs]}
+spec:
+  rhel: {major: 8, minorProfile: "8.10", hostname: files01.example.test, architecture: x86_64, selinux: enforcing, commandPacks: [coreutils, storage, systemd, incident-response]}
+  briefing: {difficulty: intermediate, duration: 60m, summary: Recover storage capacity while preserving evidence and service availability., objectivesShownToParticipants: [Find the capacity fault, Recover safely, Verify service health]}
+  actors: {initialUser: trainee, users: [{name: trainee, uid: 1000, groups: [wheel], shell: /bin/bash}], sudo: [{subject: "%wheel", commands: [ALL], requirePassword: true}]}
+  filesystem: {templates: [], entries: [{path: /var/log/application.log, owner: root, group: adm, mode: "0640", append: "disk pressure simulated\n"}]}
+  packages: {installed: [{name: systemd, version: 239-82.el8}]}
+  services: [{name: application.service, enabled: true, state: running, startConditions: [], onFailure: {journal: []}}]
+  network: {interfaces: [], dns: {servers: [], records: {}}, firewall: {defaultZone: public, zones: {}}, simulatedHosts: []}
+  faults: [{id: disk-full, descriptionForJudges: Virtual filesystem capacity is exhausted, evidence: [/var/log/application.log]}]
+  rules: []
+  objectives: [{id: recover-capacity, title: Remove the simulated capacity fault, points: 10, checks: {type: fileAbsent, path: /var/log/application.log}}, {id: preserve-selinux, title: Preserve SELinux, points: 5, checks: {type: selinuxMode, value: enforcing}}]
+  guardrails: [{id: no-selinux-disable, severity: deduction, points: -10, when: {type: selinuxModeIn, values: [permissive, disabled]}}]
+  hints: [{id: inspect-storage, cost: 3, text: Inspect filesystem and inode usage before deleting evidence.}]
+  scoring: {automatedMaximum: 15, judgeMaximum: 10, completionBonus: 0, minimumPassingScore: 9}
+  referenceSolution: ["sudo rm /var/log/application.log"]
+  referenceSolutions:
+    - ["sudo rm -f /var/log/application.log"]
+  judgeRubrics: []
