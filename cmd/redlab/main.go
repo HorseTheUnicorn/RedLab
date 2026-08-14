@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
 	"crypto/sha256"
@@ -25,6 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
 
+	redlab "github.com/redlab/redlab"
 	"github.com/redlab/redlab/internal/auth"
 	"github.com/redlab/redlab/internal/bundle"
 	"github.com/redlab/redlab/internal/catalog"
@@ -353,13 +353,21 @@ spec:
 	if err != nil {
 		return err
 	}
-	if err := auth.Save(filepath.Join(root, "data", "credentials.json"), auth.File{Organizer: organizerRecord, Teams: map[string]auth.Record{"TEAM-1": teamRecord}}); err != nil {
+	linkToken, err := auth.GenerateToken()
+	if err != nil {
+		return err
+	}
+	linkRecord, err := auth.NewRecord(linkToken)
+	if err != nil {
+		return err
+	}
+	if err := auth.Save(filepath.Join(root, "data", "credentials.json"), auth.File{Organizer: organizerRecord, Link: linkRecord, Teams: map[string]auth.Record{"TEAM-1": teamRecord}}); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(root, "teams.csv"), []byte("teamID,displayName\nTEAM-1,Practice Team\n"), 0600); err != nil {
 		return err
 	}
-	fmt.Printf("initialized event in %s\nOrganizer recovery secret: %s\nTEAM-1 join code: %s\n", root, organizerSecret, teamCode)
+	fmt.Printf("initialized event in %s\nOrganizer recovery secret: %s\nEvent link token: %s\nTEAM-1 join code: %s\n", root, organizerSecret, linkToken, teamCode)
 	return nil
 }
 func eventValidate(_ *cobra.Command, args []string) error {
@@ -380,9 +388,61 @@ func eventValidate(_ *cobra.Command, args []string) error {
 
 func newScenarioCommand() *cobra.Command {
 	scenarioCmd := &cobra.Command{Use: "scenario"}
-	scenarioCmd.AddCommand(&cobra.Command{Use: "init <directory>", Args: cobra.ExactArgs(1), RunE: scenarioInit}, &cobra.Command{Use: "validate <directory-or-package>", Args: cobra.ExactArgs(1), RunE: scenarioValidate}, &cobra.Command{Use: "test <directory-or-package>", Args: cobra.ExactArgs(1), RunE: scenarioTest}, &cobra.Command{Use: "pack <directory>", Args: cobra.ExactArgs(1), RunE: scenarioPack}, &cobra.Command{Use: "inspect <package>", Args: cobra.ExactArgs(1), RunE: scenarioInspect})
+	initID, initTitle := "custom-scenario", "Custom RedLab Scenario"
+	init := &cobra.Command{Use: "init <directory>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		return scenarioInitTemplate(args[0], initID, initTitle)
+	}}
+	init.Flags().StringVar(&initID, "id", initID, "scenario metadata ID (lowercase letters, numbers, and hyphens)")
+	init.Flags().StringVar(&initTitle, "title", initTitle, "scenario title")
+	scenarioCmd.AddCommand(init, &cobra.Command{Use: "validate <directory-or-package>", Args: cobra.ExactArgs(1), RunE: scenarioValidate}, &cobra.Command{Use: "test <directory-or-package>", Args: cobra.ExactArgs(1), RunE: scenarioTest}, &cobra.Command{Use: "pack <directory>", Args: cobra.ExactArgs(1), RunE: scenarioPack}, &cobra.Command{Use: "export <directory-or-package> <archive>", Args: cobra.ExactArgs(2), RunE: scenarioExport}, &cobra.Command{Use: "import <archive> <directory>", Args: cobra.ExactArgs(2), RunE: scenarioImport}, &cobra.Command{Use: "inspect <package>", Args: cobra.ExactArgs(1), RunE: scenarioInspect})
 	return scenarioCmd
 }
+
+func scenarioInitTemplate(root, id, title string) error {
+	if _, err := os.Stat(filepath.Join(root, "scenario.yaml")); err == nil {
+		return fmt.Errorf("refusing to overwrite existing scenario: %s", root)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if !validScenarioID(id) {
+		return errors.New("scenario id must contain 1-64 lowercase letters, numbers, and hyphens")
+	}
+	if strings.TrimSpace(title) == "" {
+		return errors.New("scenario title is required")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "files"), 0700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(root, "judge"), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "scenario.yaml"), scenario.TemplateYAML(id, title), 0600); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(root, "files", "etc", "redlab"), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "files", "etc", "redlab", "README.conf"), []byte("# Add scenario fixture files here.\n"), 0600); err != nil {
+		return err
+	}
+	fmt.Printf("initialized scenario %s (%s) in %s\n", id, title, root)
+	fmt.Printf("edit %s, then run: redlab scenario validate %s\n", filepath.Join(root, "scenario.yaml"), root)
+	return nil
+}
+
+func validScenarioID(id string) bool {
+	if len(id) == 0 || len(id) > 64 || id[0] == '-' || id[len(id)-1] == '-' {
+		return false
+	}
+	for index, char := range id {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || (index > 0 && char == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func scenarioInit(_ *cobra.Command, args []string) error {
 	root := args[0]
 	if err := os.MkdirAll(filepath.Join(root, "files", "etc", "httpd", "conf"), 0700); err != nil {
@@ -630,30 +690,37 @@ func scenarioPack(_ *cobra.Command, args []string) error {
 		return err
 	}
 	output := strings.TrimSuffix(root, string(filepath.Separator)) + ".rlab"
-	file, err := os.Create(output)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	writer := zip.NewWriter(file)
-	keys := make([]string, 0, len(pkg.Files))
-	for key := range pkg.Files {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		entry, err := writer.Create(key)
-		if err != nil {
-			return err
-		}
-		if _, err := entry.Write(pkg.Files[key]); err != nil {
-			return err
-		}
-	}
-	if err := writer.Close(); err != nil {
+	if err := pkg.WriteArchiveFile(output); err != nil {
 		return err
 	}
 	fmt.Printf("packed %s (%s)\n", output, pkg.Digest)
+	return nil
+}
+func scenarioExport(_ *cobra.Command, args []string) error {
+	pkg, diagnostics := scenario.LoadScenario(args[0])
+	if err := printDiagnostics(diagnostics); err != nil {
+		return err
+	}
+	if err := pkg.WriteArchiveFile(args[1]); err != nil {
+		return err
+	}
+	fmt.Printf("exported %s (%s)\n", args[1], pkg.Digest)
+	return nil
+}
+func scenarioImport(_ *cobra.Command, args []string) error {
+	if _, err := os.Stat(filepath.Join(args[1], "scenario.yaml")); err == nil {
+		return fmt.Errorf("refusing to overwrite existing scenario: %s", args[1])
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := scenario.ExtractPackage(args[0], args[1]); err != nil {
+		return err
+	}
+	pkg, diagnostics := scenario.LoadScenario(args[1])
+	if err := printDiagnostics(diagnostics); err != nil {
+		return err
+	}
+	fmt.Printf("imported %s (%s)\n", args[1], pkg.Digest)
 	return nil
 }
 func scenarioInspect(_ *cobra.Command, args []string) error {
@@ -684,7 +751,7 @@ func newCatalogCommand() *cobra.Command {
 func newPlayCommand() *cobra.Command {
 	var team, exportPath string
 	play := &cobra.Command{Use: "play <scenario>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
-		pkg, diagnostics := scenario.LoadScenario(args[0])
+		pkg, diagnostics := loadScenarioArgument(args[0])
 		if err := printDiagnostics(diagnostics); err != nil {
 			return err
 		}
@@ -709,6 +776,22 @@ func newPlayCommand() *cobra.Command {
 	play.Flags().StringVar(&team, "team", "PRACTICE", "team identifier")
 	play.Flags().StringVar(&exportPath, "export", "", "write a signed bundle after `lab submit`")
 	return play
+}
+
+func loadScenarioArgument(argument string) (scenario.Package, []scenario.Diagnostic) {
+	if strings.HasPrefix(argument, "builtin:") || strings.HasPrefix(argument, "core/") {
+		files, err := redlab.BuiltinScenarioFiles(argument)
+		if err != nil {
+			return scenario.Package{}, []scenario.Diagnostic{{Filename: argument, Message: err.Error()}}
+		}
+		return scenario.LoadScenarioYAML(files["scenario.yaml"], "builtin:"+argument+"/scenario.yaml", files)
+	}
+	if _, err := os.Stat(argument); os.IsNotExist(err) {
+		if files, builtinErr := redlab.BuiltinScenarioFiles(argument); builtinErr == nil {
+			return scenario.LoadScenarioYAML(files["scenario.yaml"], "builtin:"+argument+"/scenario.yaml", files)
+		}
+	}
+	return scenario.LoadScenario(argument)
 }
 
 func newServeCommand() *cobra.Command {
@@ -829,16 +912,23 @@ func newServeCommand() *cobra.Command {
 }
 
 func newJoinCommand() *cobra.Command {
-	var teamID, joinCode string
+	var teamID, joinCode, linkToken string
 	var trustFingerprint string
 	join := &cobra.Command{Use: "join <server-url>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
 		base := strings.TrimRight(args[0], "/")
-		loginBody, _ := json.Marshal(map[string]string{"teamID": teamID, "joinCode": joinCode})
+		if teamID == "" || joinCode == "" {
+			return errors.New("--team and --join-code are required")
+		}
+		loginBody, _ := json.Marshal(map[string]string{"teamID": teamID, "joinCode": joinCode, "linkToken": linkToken})
 		client, tlsConfig, err := joinHTTPClient(base, trustFingerprint)
 		if err != nil {
 			return err
 		}
-		response, err := client.Post(base+"/api/v1/auth/team/login", "application/json", bytes.NewReader(loginBody))
+		loginPath := "/api/v1/auth/team/login"
+		if linkToken != "" {
+			loginPath = "/api/v1/auth/link"
+		}
+		response, err := client.Post(base+loginPath, "application/json", bytes.NewReader(loginBody))
 		if err != nil {
 			return err
 		}
@@ -882,6 +972,7 @@ func newJoinCommand() *cobra.Command {
 	}}
 	join.Flags().StringVar(&teamID, "team", "", "team identifier")
 	join.Flags().StringVar(&joinCode, "join-code", "", "team join code")
+	join.Flags().StringVar(&linkToken, "link-token", "", "shared event link token (optional)")
 	join.Flags().StringVar(&trustFingerprint, "trust-fingerprint", "", "trust the server certificate SHA-256 fingerprint")
 	return join
 }

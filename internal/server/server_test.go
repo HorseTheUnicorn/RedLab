@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,6 +108,68 @@ func TestOrganizerLifecycleAndDashboard(t *testing.T) {
 	app.Handler().ServeHTTP(closed, closeRequest)
 	if closed.Code != http.StatusOK || !bytes.Contains(closed.Body.Bytes(), []byte("closed")) {
 		t.Fatalf("close response: %d %s", closed.Code, closed.Body.String())
+	}
+}
+
+func TestEventLinkTokenLoginAndRotation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(root, "event.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pkg := scenario.Package{Scenario: scenario.Scenario{Metadata: scenario.DocumentMeta{ID: "test", Title: "Test"}, Spec: scenario.ScenarioSpec{RHEL: scenario.RHELSpec{Major: 8, Hostname: "test.example"}, Actors: scenario.ActorsSpec{InitialUser: "trainee", Users: []scenario.UserSpec{{Name: "trainee", UID: 1000}}}}}}
+	app := New(filepath.Join(root, "event.yaml"), scenario.Event{Metadata: scenario.DocumentMeta{ID: "event"}}, map[string]scenario.Package{"test": pkg}, db)
+	organizer, err := auth.NewRecord("organizer-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, err := auth.NewRecord("team-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := auth.NewRecord("link-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Credentials = auth.File{Organizer: organizer, Link: link, Teams: map[string]auth.Record{"TEAM-1": team}}
+	login := func(token string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/link", bytes.NewBufferString(`{"teamID":"TEAM-1","joinCode":"team-secret","linkToken":"`+token+`"}`))
+		response := httptest.NewRecorder()
+		app.Handler().ServeHTTP(response, request)
+		return response
+	}
+	if response := login("link-secret"); response.Code != http.StatusOK {
+		t.Fatalf("link login: %d %s", response.Code, response.Body.String())
+	}
+	if response := login("wrong"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong link token: %d %s", response.Code, response.Body.String())
+	}
+	organizerLogin := httptest.NewRecorder()
+	app.Handler().ServeHTTP(organizerLogin, httptest.NewRequest(http.MethodPost, "/api/v1/auth/organizer/login", bytes.NewBufferString(`{"password":"organizer-secret"}`)))
+	var organizerTokens map[string]string
+	if err := json.Unmarshal(organizerLogin.Body.Bytes(), &organizerTokens); err != nil {
+		t.Fatal(err)
+	}
+	rotate := httptest.NewRequest(http.MethodPost, "/api/v1/organizer/link-token", nil)
+	rotate.Header.Set("Authorization", "Bearer "+organizerTokens["accessToken"])
+	rotated := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rotated, rotate)
+	if rotated.Code != http.StatusOK {
+		t.Fatalf("rotate: %d %s", rotated.Code, rotated.Body.String())
+	}
+	var rotatedBody map[string]string
+	if err := json.Unmarshal(rotated.Body.Bytes(), &rotatedBody); err != nil || rotatedBody["token"] == "" {
+		t.Fatalf("rotate response: %s", rotated.Body.String())
+	}
+	if response := login("link-secret"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("old token remained valid: %d %s", response.Code, response.Body.String())
+	}
+	if response := login(rotatedBody["token"]); response.Code != http.StatusOK {
+		t.Fatalf("new token login: %d %s", response.Code, response.Body.String())
 	}
 }
 

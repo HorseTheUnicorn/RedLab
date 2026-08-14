@@ -18,6 +18,7 @@ type Record struct {
 }
 type File struct {
 	Organizer Record            `json:"organizer"`
+	Link      Record            `json:"link"`
 	Teams     map[string]Record `json:"teams"`
 }
 
@@ -27,6 +28,15 @@ func GenerateCode() (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buffer), "=")[:12], nil
+}
+
+// GenerateToken returns a high-entropy URL-safe token for event linking.
+func GenerateToken() (string, error) {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buffer), nil
 }
 func NewRecord(secret string) (Record, error) {
 	saltBytes := make([]byte, 16)

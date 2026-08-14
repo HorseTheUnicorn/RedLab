@@ -73,6 +73,15 @@ go build -trimpath -o ./bin/redlab ./cmd/redlab
 
 The binary is self-contained. It does not install a system service or modify the host operating system.
 
+The first-party scenario packs are embedded in the binary. After building it, a participant can run a built-in pack without the repository or a separate download:
+
+```powershell
+.\bin\redlab.exe play broken-httpd
+.\bin\redlab.exe play builtin:gitlab-service-recovery
+```
+
+Use a directory or `.rlab` archive when you are authoring or importing a custom package.
+
 ## 4. Verify a checkout
 
 Run the normal repository checks before an event:
@@ -226,7 +235,7 @@ This creates:
 - `event/data/credentials.json` — hashed organizer and team credentials.
 - `event/data/` — event-owned runtime data and submissions.
 
-The command prints an organizer recovery secret and the initial `TEAM-1` join code. Store those securely; do not put them in source control, chat transcripts, or the public repository.
+The command prints an organizer recovery secret, an event link token, and the initial `TEAM-1` join code. Store those securely; do not put them in source control, chat transcripts, or the public repository. The link token is a shared bootstrap credential for RedLab clients; it does not replace the team ID or team join code.
 
 Edit `event/event.yaml` and add the scenario packages you want to use. Paths are resolved relative to `event.yaml`. From an event directory created in the repository root, entries can point to the built-in packs like this:
 
@@ -258,6 +267,8 @@ go run ./cmd/redlab event backup .\event\event.yaml .\event\data\event-backup.db
 
 For a serverless event, collect bundles from the teams and review them with `evidence verify`, `submissions list`, and `judge` as shown above.
 
+When the organizer wants a browser control panel, start `serve` and open `http://127.0.0.1:8443/` (or the configured address). The panel uses the organizer recovery secret to log on and provides event close/reopen controls, live session and submission review, judging, submission export, scenario package management, and link-token rotation. It has no external JavaScript or CDN dependency.
+
 ## 9. Optional coordinated remote mode
 
 Remote mode is optional. It is useful when the organizer wants session assignment, live session state, and server-side collection, but it is not needed when all participants run locally and exchange bundles.
@@ -279,7 +290,7 @@ The generated event configuration uses generated TLS. RedLab prints the certific
 Give each participant the server URL, their team ID, their join code, and the printed certificate fingerprint:
 
 ```powershell
-go run ./cmd/redlab join https://ORGANIZER-HOST:8443 --team HACK-1 --join-code TEAM-CODE --trust-fingerprint SHA256-FINGERPRINT
+go run ./cmd/redlab join https://ORGANIZER-HOST:8443 --team HACK-1 --join-code TEAM-CODE --link-token EVENT-LINK-TOKEN --trust-fingerprint SHA256-FINGERPRINT
 ```
 
 The participant still works in the same bounded virtual terminal. In remote mode, submissions are stored under the event's configured data directory. Never disable TLS just to make a LAN connection work; use the generated certificate or provide an organizer-managed certificate and key in `event.yaml`.
@@ -293,7 +304,7 @@ Run `go run ./cmd/redlab --help` or `go run ./cmd/redlab <command> --help` for f
 | `version` | Print the RedLab build and schema version. |
 | `catalog commands` | List the versioned command compatibility catalog; filter with `--pack` or `--level`. |
 | `play <scenario>` | Run a local participant session. |
-| `scenario init <directory>` | Create a scenario authoring template. |
+| `scenario init <directory> [--id ID] [--title TITLE]` | Create a new scenario authoring template without recompiling. |
 | `scenario validate <directory-or-package>` | Strictly validate a scenario. |
 | `scenario test <directory-or-package>` | Run the reference solution, replay, reset, and guardrail checks. |
 | `scenario pack <directory>` | Create a portable `.rlab` scenario archive. |
@@ -314,19 +325,28 @@ The command catalog is deliberately bounded and versioned. A recognized command 
 
 ## 11. Author or add a scenario
 
-Create a template:
+Create a new scenario entirely with the binary. This creates strict YAML plus an editable fixture directory; no Go source change or recompilation is required:
 
 ```powershell
-go run ./cmd/redlab scenario init .\scenario-packs\custom\my-scenario
+go run ./cmd/redlab scenario init .\scenarios\my-scenario --id my-scenario --title "My RHEL Troubleshooting Drill"
 ```
 
-Edit `scenario.yaml` and optional files under `files/`, then run:
+Edit `scenario.yaml`, add or remove virtual fixture files under `files/`, then validate and test:
 
 ```powershell
-go run ./cmd/redlab scenario validate .\scenario-packs\custom\my-scenario
-go run ./cmd/redlab scenario test .\scenario-packs\custom\my-scenario
-go run ./cmd/redlab scenario pack .\scenario-packs\custom\my-scenario
-go run ./cmd/redlab scenario inspect .\scenario-packs\custom\my-scenario.rlab
+go run ./cmd/redlab scenario validate .\scenarios\my-scenario
+go run ./cmd/redlab scenario test .\scenarios\my-scenario
+go run ./cmd/redlab scenario pack .\scenarios\my-scenario
+```
+
+The same workflow is available from the organizer dashboard. Log on, open **Scenario Workshop**, create a template or import a `.rlab` package, edit `scenario.yaml`, add/delete package files, validate/save, and export the package for another RedLab user. Scenario changes are locked once sessions exist so an event cannot change underneath participants.
+
+The CLI package workflow is:
+
+```powershell
+go run ./cmd/redlab scenario export .\scenarios\my-scenario .\my-scenario.rlab
+go run ./cmd/redlab scenario import .\my-scenario.rlab .\scenarios\teammate-copy
+go run ./cmd/redlab scenario inspect .\my-scenario.rlab
 ```
 
 Scenario YAML is strict: unknown fields and unsupported rule conditions fail validation. Files use safe virtual POSIX paths. Absolute host paths, `..` traversal, symlinks, duplicate archive entries, oversized files, and excessive archive expansion are rejected. A scenario package is immutable once an event starts.

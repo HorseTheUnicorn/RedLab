@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RedLab Organizer Control Panel</title>
+<style>
+html{background:#008080}
+body{margin:8px;background:#c0c0c0;color:#000;font:13px Tahoma,Verdana,Arial,sans-serif}
+button,input,select,textarea{font:13px Tahoma,Verdana,Arial,sans-serif}
+button{background:#c0c0c0;border:2px outset #fff;border-right-color:#404040;border-bottom-color:#404040;padding:3px 9px;color:#000;cursor:pointer}
+button:active{border-style:inset}
+button:disabled{color:#777;cursor:default}
+input,select,textarea{background:#fff;border:2px inset #fff;border-right-color:#808080;border-bottom-color:#808080;padding:3px}
+textarea{width:100%;box-sizing:border-box;font:12px "Courier New",monospace;resize:vertical}
+.window{max-width:1280px;margin:0 auto;border:2px outset #fff;background:#c0c0c0;box-shadow:2px 2px #000}
+.titlebar{background:#000080;color:#fff;font-weight:bold;padding:4px 7px;letter-spacing:.2px}
+.titlebar span{float:right;font-weight:normal}
+.menubar{padding:3px 7px;border-bottom:1px solid #808080;background:#d4d0c8}
+.menubar a{color:#000;text-decoration:none;margin-right:16px}
+.menubar a:hover{text-decoration:underline}
+.content{padding:8px}
+.hero{background:#000;color:#0f0;padding:7px;font:14px "Courier New",monospace;margin-bottom:8px;border:2px inset #fff}
+.hero b{color:#ff0}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.wide{grid-column:1/-1}
+fieldset{border:2px groove #fff;margin:0;padding:7px;min-width:0}
+legend{font-weight:bold;padding:0 4px}
+.panel{background:#fff;border:2px inset #fff;padding:6px;min-height:35px}
+.panel.dark{background:#000;color:#0f0;font:12px "Courier New",monospace;overflow:auto}
+.status{font-weight:bold}.ok{color:#006400}.bad{color:#900}.muted{color:#555}
+.toolbar{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-bottom:6px}
+.toolbar label{font-weight:bold}
+.danger{color:#900}.token{font:12px "Courier New",monospace;word-break:break-all;background:#ffffe1;border:1px solid #808000;padding:5px;display:none;margin-top:6px}
+table{width:100%;border-collapse:collapse;background:#fff;font-size:12px}
+th,td{border:1px solid #808080;padding:3px;text-align:left;vertical-align:top}
+th{background:#000080;color:#fff}.zebra tr:nth-child(even){background:#e8e8e8}
+pre{white-space:pre-wrap;word-break:break-word;margin:0;font:12px "Courier New",monospace}
+.small{font-size:11px}.right{text-align:right}.hidden{display:none!important}
+.split{display:grid;grid-template-columns:220px 1fr;gap:7px}
+.list{background:#fff;border:2px inset #fff;min-height:170px;max-height:260px;overflow:auto;padding:2px}
+.list button{display:block;width:100%;border:0;text-align:left;background:#fff;padding:4px}
+.list button.selected{background:#000080;color:#fff}
+.footer{border-top:1px solid #808080;padding:4px 7px;color:#444;font-size:11px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.split{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">RedLab Organizer Control Panel <span>_ □ X</span></div>
+  <div class="menubar"><a href="#eventPanel">Event</a><a href="#sessionsPanel">Sessions</a><a href="#scenarioPanel">Scenario Workshop</a><a href="#linkPanel">Link Token</a><a href="#helpPanel">Help</a></div>
+  <div class="content">
+    <div class="hero"><b>REDLAB.EXE</b> &gt; deterministic RHEL 8 behavioral emulator<br><span id="clock">status: starting dashboard...</span></div>
+
+    <section id="loginPanel" class="panel">
+      <form id="loginForm" class="toolbar">
+        <label for="password">Organizer password:</label><input id="password" type="password" autocomplete="current-password" size="28">
+        <button type="submit">Log on</button><span id="loginMessage" class="bad"></span>
+      </form>
+      <div class="small muted">The organizer recovery secret printed by <code>redlab event init</code> is the dashboard password.</div>
+    </section>
+
+    <div id="app" class="hidden">
+      <div class="toolbar"><button id="refreshButton">Refresh all</button><button id="logoutButton">Log off</button><span id="message" class="status"></span></div>
+      <div class="grid">
+        <fieldset id="eventPanel"><legend>Event control</legend>
+          <div class="panel"><div id="eventName">Loading...</div><div id="eventStatus" class="status"></div><div id="preflight" class="small"></div></div>
+          <div class="toolbar" style="margin-top:6px"><button id="openButton">Re-open event</button><button id="closeButton" class="danger">Close submissions</button></div>
+        </fieldset>
+        <fieldset id="linkPanel"><legend>Participant link token</legend>
+          <div class="small">Rotate this shared event token when distributing a fresh RedLab client. Team members still need their team ID and team join code.</div>
+          <div class="toolbar" style="margin-top:6px"><button id="rotateTokenButton">Generate / rotate token</button><span id="tokenState" class="status"></span></div>
+          <div id="tokenBox" class="token"></div><button id="copyTokenButton" class="hidden">Copy token</button>
+        </fieldset>
+
+        <fieldset id="sessionsPanel" class="wide"><legend>Live sessions and submissions</legend>
+          <div class="toolbar"><button id="sessionDetailsButton">Show selected session JSON</button><button id="exportButton">Export selected submission</button></div>
+          <table class="zebra"><thead><tr><th>Session</th><th>Team</th><th>Scenario</th><th>Score</th><th>Submitted</th><th>Judged</th></tr></thead><tbody id="sessionsBody"><tr><td colspan="6">Loading...</td></tr></tbody></table>
+          <div id="sessionDetails" class="panel dark" style="margin-top:6px;display:none"></div>
+          <div class="panel" style="margin-top:6px">
+            <form id="judgeForm" class="toolbar"><label for="judgeScore">Judge score:</label><input id="judgeScore" type="number" min="0" value="0" size="5"><label for="judgeNotes">Notes:</label><input id="judgeNotes" size="45"><button type="submit">Save rubric score</button></form>
+            <div class="small muted">Select a row before judging or exporting.</div>
+          </div>
+        </fieldset>
+
+        <fieldset id="scenarioPanel" class="wide"><legend>Scenario workshop — packages, templates, import/export</legend>
+          <div class="toolbar"><label>New template ID:</label><input id="templateID" placeholder="disk-pressure" size="18"><label>Title:</label><input id="templateTitle" placeholder="Disk Pressure Drill" size="28"><button id="templateButton">Create template</button></div>
+          <div class="toolbar"><label>Import .rlab:</label><input id="scenarioFile" type="file" accept=".rlab,.zip"><button id="importButton">Import package</button><span class="small muted">New and edited packages are kept in the event data directory.</span></div>
+          <div class="split">
+            <div><div id="scenarioList" class="list"></div><div class="toolbar" style="margin-top:5px"><button id="exportScenarioButton">Export selected</button><button id="removeScenarioButton" class="danger">Remove selected</button></div></div>
+            <div>
+              <div id="scenarioInfo" class="small muted">Choose a scenario package.</div>
+              <form id="yamlForm"><label for="scenarioYAML"><b>scenario.yaml</b></label><textarea id="scenarioYAML" rows="18" spellcheck="false"></textarea><div class="toolbar"><button type="submit">Validate and save YAML</button></div></form>
+              <div class="panel" style="margin-top:5px"><b>Package files</b><div class="toolbar"><select id="fileSelect" style="min-width:220px"></select><button id="newFileButton" type="button">New file</button><button id="deleteFileButton" type="button" class="danger">Delete file</button></div><input id="filePath" size="45" placeholder="files/etc/example.conf"><textarea id="fileContent" rows="8" spellcheck="false"></textarea><div class="toolbar"><button id="saveFileButton" type="button">Save file</button></div></div>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset id="helpPanel" class="wide"><legend>Quick reference</legend><div class="panel dark">Local-only design: participant commands stay inside the deterministic virtual RHEL model. The dashboard edits declarative scenario YAML and package files; it never executes host shell commands. For a participant link: redlab join &lt;URL&gt; --team TEAM-1 --join-code &lt;code&gt; --link-token &lt;token&gt;</div></fieldset>
+      </div>
+    </div>
+  </div>
+  <div class="footer">RedLab dashboard • works without external JavaScript, CDN, or installed dashboard dependencies</div>
+</div>
+<script>
+(function(){
+  'use strict';
+  var access=sessionStorage.getItem('redlab.access')||'';
+  var refresh=sessionStorage.getItem('redlab.refresh')||'';
+  var selectedScenario='';
+  var selectedSession='';
+  var sessions=[];
+  var submissions=[];
+  var scenarios=[];
+  var $=function(id){return document.getElementById(id)};
+  var esc=function(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
+  var setMessage=function(value, bad){$('message').textContent=value||'';$('message').className=bad?'status bad':'status ok'};
+  var jsonFetch=function(path, options){
+    options=options||{}; options.headers=options.headers||{};
+    if(access) options.headers.Authorization='Bearer '+access;
+    return fetch(path,options).then(function(response){
+      return response.text().then(function(text){var data={};try{data=text?JSON.parse(text):{}}catch(e){data={error:text}};if(response.status===401){logout();throw new Error('organizer login required')}if(!response.ok)throw new Error(data.error||response.statusText);return data});
+    });
+  };
+  var logout=function(){access='';refresh='';sessionStorage.removeItem('redlab.access');sessionStorage.removeItem('redlab.refresh');$('app').className='hidden';$('loginPanel').className='panel';$('password').focus()};
+  var showApp=function(){ $('loginPanel').className='hidden'; $('app').className=''; loadAll() };
+  $('loginForm').addEventListener('submit',function(event){event.preventDefault();$('loginMessage').textContent='';fetch('/api/v1/auth/organizer/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('password').value})}).then(function(response){return response.json().then(function(data){if(!response.ok)throw new Error(data.error||'login failed');return data})}).then(function(data){access=data.accessToken;refresh=data.refreshToken;sessionStorage.setItem('redlab.access',access);sessionStorage.setItem('redlab.refresh',refresh);$('password').value='';showApp()}).catch(function(error){$('loginMessage').textContent=error.message})});
+  $('logoutButton').addEventListener('click',logout);
+  $('refreshButton').addEventListener('click',loadAll);
+  var loadEvent=function(){return Promise.all([jsonFetch('/api/v1/event'),jsonFetch('/api/v1/event/status'),jsonFetch('/api/v1/preflight')]).then(function(parts){var event=parts[0],status=parts[1],pre=parts[2];$('eventName').textContent=(event.metadata&&event.metadata.title)||event.metadata&&event.metadata.id||'RedLab event';$('eventStatus').textContent='Status: '+status.status;$('eventStatus').className='status '+(status.status==='open'?'ok':'bad');$('preflight').textContent='Preflight: '+pre.status+' • '+JSON.stringify(pre.checks||{});$('clock').textContent='status: '+status.status+' • last refresh '+new Date().toLocaleTimeString()})};
+  var loadSessions=function(){return Promise.all([jsonFetch('/api/v1/organizer/sessions'),jsonFetch('/api/v1/organizer/submissions')]).then(function(parts){sessions=parts[0]||[];submissions=parts[1]||[];var rows=sessions.map(function(item){return '<tr data-session="'+esc(item.sessionID)+'"><td><button class="selectSession" data-id="'+esc(item.sessionID)+'">'+esc(item.sessionID)+'</button></td><td>'+esc(item.teamID)+'</td><td>'+esc(item.scenarioID)+'</td><td>'+esc(item.totalScore)+' / '+esc(item.totalMaximum)+'</td><td>'+esc(item.submittedAt||'—')+'</td><td>'+esc(item.judged?'yes':'no')+'</td></tr>'}).join('');$('sessionsBody').innerHTML=rows||'<tr><td colspan="6">No sessions yet.</td></tr>';Array.prototype.forEach.call(document.querySelectorAll('.selectSession'),function(button){button.addEventListener('click',function(){selectedSession=button.getAttribute('data-id');Array.prototype.forEach.call(document.querySelectorAll('[data-session]'),function(row){row.style.background=row.getAttribute('data-session')===selectedSession?'#ffff99':''});var item=sessions.filter(function(x){return x.sessionID===selectedSession})[0];$('judgeScore').value=item&&item.judgeScore||0;$('judgeNotes').value=item&&item.judgeNotes||''})})})};
+  var loadScenarios=function(){return jsonFetch('/api/v1/organizer/scenarios').then(function(items){scenarios=items||[];var html=scenarios.map(function(item){return '<button class="selectScenario '+(item.id===selectedScenario?'selected':'')+'" data-id="'+esc(item.id)+'">'+esc(item.id)+'<br><span class="small">'+esc(item.title)+'</span></button>'}).join('');$('scenarioList').innerHTML=html||'<div class="muted" style="padding:5px">No packages loaded.</div>';Array.prototype.forEach.call(document.querySelectorAll('.selectScenario'),function(button){button.addEventListener('click',function(){selectedScenario=button.getAttribute('data-id');loadScenarioEditor()})});if(selectedScenario&&!scenarios.some(function(x){return x.id===selectedScenario}))selectedScenario='';if(!selectedScenario&&scenarios.length)selectedScenario=scenarios[0].id;if(selectedScenario)loadScenarioEditor()})};
+  var loadScenarioEditor=function(){if(!selectedScenario)return;var item=scenarios.filter(function(x){return x.id===selectedScenario})[0];$('scenarioInfo').textContent=item.id+' — '+item.title+' • '+item.version+' • '+item.files+' files • digest '+item.digest+' • source '+(item.source||'managed');Promise.all([jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/source'),jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/files')]).then(function(parts){$('scenarioYAML').value=parts[0].yaml;var files=parts[1]||[];$('fileSelect').innerHTML=files.map(function(file){return '<option value="'+esc(file.path)+'">'+esc(file.path)+'</option>'}).join('');if(files.length)selectFile(files[0].path);else selectFile('')}).catch(function(error){setMessage(error.message,true)})};
+  var selectFile=function(path){$('fileSelect').value=path;$('filePath').value=path;if(!path||path==='scenario.yaml'){$('fileContent').value='';$('fileContent').disabled=true;$('saveFileButton').disabled=true;$('deleteFileButton').disabled=true;return}$('fileContent').disabled=false;$('saveFileButton').disabled=false;$('deleteFileButton').disabled=false;jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/files').then(function(files){var file=(files||[]).filter(function(x){return x.path===path})[0];$('fileContent').value=file&&file.text?file.content:'[binary or oversized file; replace through CLI]'}).catch(function(error){setMessage(error.message,true)})};
+  $('fileSelect').addEventListener('change',function(){selectFile($('fileSelect').value)});
+  $('newFileButton').addEventListener('click',function(){$('fileSelect').value='';$('filePath').value='';$('fileContent').value='';$('fileContent').disabled=false;$('saveFileButton').disabled=false;$('deleteFileButton').disabled=true;$('filePath').focus()});
+  $('yamlForm').addEventListener('submit',function(event){event.preventDefault();if(!selectedScenario)return;jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/source',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({yaml:$('scenarioYAML').value})}).then(function(){setMessage('scenario.yaml saved and validated');loadScenarios()}).catch(function(error){setMessage(error.message,true)})});
+  $('saveFileButton').addEventListener('click',function(){if(!selectedScenario)return;jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/files',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:$('filePath').value,content:$('fileContent').value})}).then(function(){setMessage('package file saved');loadScenarios()}).catch(function(error){setMessage(error.message,true)})});
+  $('deleteFileButton').addEventListener('click',function(){var path=$('filePath').value;if(!selectedScenario||!path||!confirm('Delete '+path+'?'))return;jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/files?path='+encodeURIComponent(path),{method:'DELETE'}).then(function(){setMessage('package file deleted');loadScenarios()}).catch(function(error){setMessage(error.message,true)})});
+  $('templateButton').addEventListener('click',function(){jsonFetch('/api/v1/organizer/scenarios/template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:$('templateID').value,title:$('templateTitle').value})}).then(function(){setMessage('template created');$('templateID').value='';$('templateTitle').value='';loadScenarios()}).catch(function(error){setMessage(error.message,true)})});
+  $('importButton').addEventListener('click',function(){var file=$('scenarioFile').files[0];if(!file){setMessage('choose a .rlab package first',true);return}var body=new FormData();body.append('file',file,file.name);jsonFetch('/api/v1/organizer/scenarios/import',{method:'POST',body:body}).then(function(){setMessage('scenario package imported');$('scenarioFile').value='';loadScenarios()}).catch(function(error){setMessage(error.message,true)})});
+  var download=function(blob,name){var link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=name;document.body.appendChild(link);link.click();setTimeout(function(){URL.revokeObjectURL(link.href);link.remove()},100)};
+  $('exportScenarioButton').addEventListener('click',function(){if(!selectedScenario)return;fetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario)+'/export',{headers:{Authorization:'Bearer '+access}}).then(function(response){if(!response.ok)throw new Error('scenario export failed');return response.blob()}).then(function(blob){download(blob,selectedScenario+'.rlab');setMessage('scenario exported')}).catch(function(error){setMessage(error.message,true)})});
+  $('removeScenarioButton').addEventListener('click',function(){if(!selectedScenario||!confirm('Remove scenario '+selectedScenario+' from this event?'))return;jsonFetch('/api/v1/organizer/scenarios/'+encodeURIComponent(selectedScenario),{method:'DELETE'}).then(function(){setMessage('scenario removed');selectedScenario='';loadScenarios()}).catch(function(error){setMessage(error.message,true)})});
+  $('openButton').addEventListener('click',function(){jsonFetch('/api/v1/organizer/event/reopen',{method:'POST'}).then(function(){setMessage('event re-opened');loadEvent()}).catch(function(error){setMessage(error.message,true)})});
+  $('closeButton').addEventListener('click',function(){if(!confirm('Close submissions for this event?'))return;jsonFetch('/api/v1/organizer/event/close',{method:'POST'}).then(function(){setMessage('event closed');loadEvent()}).catch(function(error){setMessage(error.message,true)})});
+  $('rotateTokenButton').addEventListener('click',function(){if(!confirm('Rotate the shared event link token? Existing link tokens stop working.'))return;jsonFetch('/api/v1/organizer/link-token',{method:'POST'}).then(function(data){$('tokenBox').textContent=data.token;$('tokenBox').style.display='block';$('copyTokenButton').className='';$('tokenState').textContent='new token shown once';setMessage('link token rotated')}).catch(function(error){setMessage(error.message,true)})});
+  $('copyTokenButton').addEventListener('click',function(){navigator.clipboard&&navigator.clipboard.writeText($('tokenBox').textContent).then(function(){$('tokenState').textContent='copied to clipboard'}).catch(function(){$('tokenState').textContent='select and copy the token'})});
+  $('sessionDetailsButton').addEventListener('click',function(){if(!selectedSession){setMessage('select a session first',true);return}var item=sessions.filter(function(x){return x.sessionID===selectedSession})[0];$('sessionDetails').style.display='block';$('sessionDetails').textContent=JSON.stringify(item||{},null,2)});
+  $('judgeForm').addEventListener('submit',function(event){event.preventDefault();if(!selectedSession){setMessage('select a session first',true);return}jsonFetch('/api/v1/submissions/'+encodeURIComponent(selectedSession)+'/judging',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({score:Number($('judgeScore').value||0),notes:$('judgeNotes').value})}).then(function(){setMessage('judge score saved');loadSessions()}).catch(function(error){setMessage(error.message,true)})});
+  $('exportButton').addEventListener('click',function(){if(!selectedSession){setMessage('select a session first',true);return}jsonFetch('/api/v1/submissions/'+encodeURIComponent(selectedSession)+'/export',{method:'POST'}).then(function(data){setMessage('bundle written to '+data.bundle) }).catch(function(error){setMessage(error.message,true)})});
+  var loadAll=function(){setMessage('refreshing...');Promise.all([loadEvent(),loadSessions(),loadScenarios(),jsonFetch('/api/v1/organizer/link-token').then(function(data){$('tokenState').textContent=data.configured?'configured (secret hidden)':'not configured'})]).then(function(){setMessage('ready')}).catch(function(error){setMessage(error.message,true)})};
+  if(access)showApp();else $('password').focus();
+})();
+</script>
+</body>
+</html>

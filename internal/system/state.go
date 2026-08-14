@@ -90,6 +90,18 @@ type Package struct {
 	Version string `json:"version"`
 }
 
+// Process is a deterministic process-table entry in the virtual host. It is
+// data only: RedLab never starts a host process for an emulated command.
+type Process struct {
+	PID         int    `json:"pid"`
+	PPID        int    `json:"ppid"`
+	User        string `json:"user"`
+	State       string `json:"state"`
+	CPUSeconds  int64  `json:"cpuSeconds"`
+	MemoryBytes int64  `json:"memoryBytes"`
+	Command     string `json:"command"`
+}
+
 type State struct {
 	mu          sync.RWMutex
 	Hostname    string              `json:"hostname"`
@@ -98,6 +110,7 @@ type State struct {
 	Users       map[string]User     `json:"users"`
 	SudoRules   []scenario.SudoRule `json:"sudoRules"`
 	Services    map[string]Service  `json:"services"`
+	Processes   []Process           `json:"processes"`
 	Journal     []JournalEntry      `json:"journal"`
 	Network     Network             `json:"network"`
 	SELinux     SELinux             `json:"selinux"`
@@ -183,6 +196,7 @@ func NewState(pkg scenario.Package, seed time.Time) (*State, error) {
 			s.refreshServiceEffects(service.Name)
 		}
 	}
+	s.rebuildProcessesLocked()
 	for _, journal := range pkg.Scenario.Spec.Services {
 		for _, item := range journal.OnFailure.Journal {
 			s.appendJournalLocked("", journal.Name, item.Priority, item.Message)
@@ -199,7 +213,8 @@ func (s *State) cloneUnlocked() *State {
 		Hostname: s.Hostname, Clock: s.Clock, Files: nil, Users: nil,
 		SudoRules: append([]scenario.SudoRule(nil), s.SudoRules...),
 		Services:  nil, Journal: nil, Network: s.Network, SELinux: s.SELinux,
-		Packages: nil, Env: nil, CurrentUser: s.CurrentUser, CWD: s.CWD,
+		Processes: append([]Process(nil), s.Processes...),
+		Packages:  nil, Env: nil, CurrentUser: s.CurrentUser, CWD: s.CWD,
 	}
 	copyState.Files = map[string]File{}
 	for k, v := range s.Files {
@@ -274,6 +289,7 @@ func (s *State) Reset() error {
 	s.Users = initial.Users
 	s.SudoRules = initial.SudoRules
 	s.Services = initial.Services
+	s.Processes = initial.Processes
 	s.Journal = initial.Journal
 	s.Network = initial.Network
 	s.SELinux = initial.SELinux
@@ -426,6 +442,13 @@ func (s *State) Remove(filename, user string) error {
 }
 
 func (s *State) Copy(source, destination, user string, move bool) error {
+	return s.CopyRecursive(source, destination, user, move, false)
+}
+
+// CopyRecursive implements the safe virtual equivalent of cp -r and mv. The
+// destination is resolved like POSIX tools: an existing directory receives a
+// child named after the source.
+func (s *State) CopyRecursive(source, destination, user string, move, recursive bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	src, err := NormalizePath(source, s.CWD)
@@ -440,11 +463,23 @@ func (s *State) Copy(source, destination, user string, move bool) error {
 	if !ok {
 		return fmt.Errorf("%s: No such file or directory", source)
 	}
-	if file.Directory {
+	if file.Directory && !move && !recursive {
 		return fmt.Errorf("%s: omitting directory", source)
 	}
-	if !s.canReadLocked(file, user) {
+	if src == "/" {
+		return errors.New("cannot copy or move the virtual root")
+	}
+	if !s.canReadLocked(file, user) && user != "root" {
 		return fmt.Errorf("%s: Permission denied", source)
+	}
+	if existing, exists := s.Files[dst]; exists && existing.Directory {
+		dst = path.Join(dst, path.Base(src))
+	}
+	if dst == src {
+		return errors.New("source and destination are the same file")
+	}
+	if file.Directory && strings.HasPrefix(dst, strings.TrimSuffix(src, "/")+"/") {
+		return errors.New("cannot copy a directory into itself")
 	}
 	s.ensureParents(dst)
 	parent := s.Files[path.Dir(dst)]
@@ -454,10 +489,31 @@ func (s *State) Copy(source, destination, user string, move bool) error {
 	if existing, exists := s.Files[dst]; exists && user != "root" && !s.canWriteLocked(existing, user) {
 		return fmt.Errorf("%s: Permission denied", destination)
 	}
-	file.Path = dst
-	s.Files[dst] = file
+	if !file.Directory {
+		file.Path = dst
+		s.Files[dst] = file
+	} else {
+		prefix := strings.TrimSuffix(src, "/") + "/"
+		paths := make([]string, 0)
+		for name := range s.Files {
+			if name == src || strings.HasPrefix(name, prefix) {
+				paths = append(paths, name)
+			}
+		}
+		sort.Slice(paths, func(i, j int) bool { return paths[i] < paths[j] })
+		for _, name := range paths {
+			entry := s.Files[name]
+			relative := strings.TrimPrefix(name, src)
+			entry.Path = path.Clean(dst + "/" + relative)
+			s.Files[entry.Path] = entry
+		}
+	}
 	if move {
-		delete(s.Files, src)
+		for name := range s.Files {
+			if name == src || strings.HasPrefix(name, strings.TrimSuffix(src, "/")+"/") {
+				delete(s.Files, name)
+			}
+		}
 	}
 	return nil
 }
@@ -524,6 +580,42 @@ func (s *State) ServicesSnapshot() []Service {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+func (s *State) ProcessesSnapshot() []Process {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]Process(nil), s.Processes...)
+	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
+	return out
+}
+
+// SignalProcess applies the small, scenario-useful process lifecycle model.
+// PID 1 is protected just as it is on a real RHEL host.
+func (s *State) SignalProcess(pid int, signal, user string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pid <= 1 {
+		return errors.New("cannot kill process 1")
+	}
+	for _, process := range s.Processes {
+		if process.PID != pid {
+			continue
+		}
+		if user != "root" && user != process.User {
+			return errors.New("Operation not permitted")
+		}
+		for name, service := range s.Services {
+			if process.Command == "/usr/lib/systemd/system/"+name {
+				service.State = "stopped"
+				s.Services[name] = service
+				s.clearServiceEffectsLocked(name)
+				s.appendJournalLocked(user, name, "warning", fmt.Sprintf("Stopped %s after signal %s", name, signal))
+			}
+		}
+	}
+	s.rebuildProcessesLocked()
+	return nil
 }
 
 func (s *State) VirtualUsage() (bytes, inodes int) {
@@ -601,6 +693,7 @@ func (s *State) StartService(name, user string) error {
 	}
 	service.State = "running"
 	s.Services[name] = service
+	s.rebuildProcessesLocked()
 	s.refreshServiceEffectsLocked(name)
 	s.appendJournalLocked(user, name, "info", "Started "+name)
 	return nil
@@ -617,6 +710,7 @@ func (s *State) StopService(name, user string) error {
 	}
 	service.State = "stopped"
 	s.Services[name] = service
+	s.rebuildProcessesLocked()
 	s.clearServiceEffectsLocked(name)
 	s.appendJournalLocked(user, name, "info", "Stopped "+name)
 	return nil
@@ -972,6 +1066,21 @@ func (s *State) refreshServiceEffectsLocked(name string) {
 			_ = zone
 		}
 	}
+}
+
+func (s *State) rebuildProcessesLocked() {
+	processes := []Process{{PID: 1, PPID: 0, User: "root", State: "S", CPUSeconds: 1, MemoryBytes: 4096, Command: "/sbin/init"}}
+	names := make([]string, 0, len(s.Services))
+	for name, service := range s.Services {
+		if service.State == "running" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for index, name := range names {
+		processes = append(processes, Process{PID: 100 + index, PPID: 1, User: "root", State: "S<", CPUSeconds: int64(index + 1), MemoryBytes: int64(8192 + index*1024), Command: "/usr/lib/systemd/system/" + name})
+	}
+	s.Processes = processes
 }
 func (s *State) clearServiceEffectsLocked(name string) {
 	if name == "httpd.service" || name == "httpd" {

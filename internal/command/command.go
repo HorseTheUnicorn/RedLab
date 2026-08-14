@@ -164,6 +164,12 @@ func RegisterCore(r *Registry) {
 	reg("rpm", "packages", "Inspect virtual installed packages", catalog.LevelA, runRPM)
 	reg("dnf", "packages", "Inspect virtual package state", catalog.LevelB, runDNF)
 	reg("ps", "processes", "List deterministic virtual processes", catalog.LevelB, runPS)
+	reg("pstree", "processes", "Show the virtual process tree", catalog.LevelB, runPSTree)
+	reg("pgrep", "processes", "Find virtual processes by command", catalog.LevelB, runPGrep)
+	reg("pkill", "processes", "Signal virtual processes by command", catalog.LevelB, runPKill)
+	reg("kill", "processes", "Signal a virtual process", catalog.LevelB, runKill)
+	reg("killall", "processes", "Signal virtual processes by name", catalog.LevelB, runKillAll)
+	reg("top", "processes", "Show a deterministic virtual process summary", catalog.LevelB, runTop)
 	reg("df", "storage", "Report deterministic virtual filesystem usage", catalog.LevelB, runDF)
 	reg("history", "shell", "Print command history", catalog.LevelA, func(e *Env, _ []string, _ string) Result {
 		var b strings.Builder
@@ -585,23 +591,39 @@ func runChown(e *Env, a []string, _ string) Result {
 }
 
 func runCopy(e *Env, a []string, _ string) Result {
-	if len(a) != 2 {
-		return Result{ExitCode: 2, Stderr: "cp: usage: cp SOURCE DEST\n"}
+	recursive := false
+	operands := make([]string, 0, len(a))
+	for _, arg := range a {
+		if arg == "-r" || arg == "-R" || arg == "--recursive" {
+			recursive = true
+			continue
+		}
+		operands = append(operands, arg)
 	}
-	if err := e.State.Copy(a[0], a[1], e.User, false); err != nil {
+	if len(operands) != 2 {
+		return Result{ExitCode: 2, Stderr: "cp: usage: cp [-r] SOURCE DEST\n"}
+	}
+	if err := e.State.CopyRecursive(operands[0], operands[1], e.User, false, recursive); err != nil {
 		return Result{ExitCode: 1, Stderr: "cp: " + err.Error() + "\n"}
 	}
-	return Result{Mutations: []string{a[0] + " -> " + a[1]}}
+	return Result{Mutations: []string{operands[0] + " -> " + operands[1]}}
 }
 
 func runMove(e *Env, a []string, _ string) Result {
-	if len(a) != 2 {
+	operands := make([]string, 0, len(a))
+	for _, arg := range a {
+		if arg == "-f" || arg == "--force" {
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	if len(operands) != 2 {
 		return Result{ExitCode: 2, Stderr: "mv: usage: mv SOURCE DEST\n"}
 	}
-	if err := e.State.Copy(a[0], a[1], e.User, true); err != nil {
+	if err := e.State.CopyRecursive(operands[0], operands[1], e.User, true, true); err != nil {
 		return Result{ExitCode: 1, Stderr: "mv: " + err.Error() + "\n"}
 	}
-	return Result{Mutations: []string{a[0] + " -> " + a[1]}}
+	return Result{Mutations: []string{operands[0] + " -> " + operands[1]}}
 }
 
 func runRmdir(e *Env, a []string, _ string) Result {
@@ -851,18 +873,150 @@ func runDNF(e *Env, a []string, _ string) Result {
 	return Result{ExitCode: 2, Stderr: "dnf: supported form is dnf list installed\n"}
 }
 
-func runPS(e *Env, _ []string, _ string) Result {
+func runPS(e *Env, args []string, _ string) Result {
+	processes := e.State.ProcessesSnapshot()
+	wide := false
+	full := false
+	for _, arg := range args {
+		switch arg {
+		case "aux":
+			wide = true
+		case "-ef":
+			full = true
+		case "-e", "-f":
+			full = true
+		case "-a", "-x":
+			wide = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return Result{ExitCode: 1, Stderr: "ps: unsupported option " + arg + "\n"}
+			}
+		}
+	}
 	var out strings.Builder
-	out.WriteString("PID TTY          TIME CMD\n")
-	out.WriteString("  1 ?        00:00:00 systemd\n")
-	pid := 100
-	for _, service := range e.State.ServicesSnapshot() {
-		if service.State == "running" {
-			fmt.Fprintf(&out, "%3d ?        00:00:00 %s\n", pid, strings.TrimSuffix(service.Name, ".service"))
-			pid++
+	if wide {
+		out.WriteString("USER       PID %CPU %MEM STAT COMMAND\n")
+	} else if full {
+		out.WriteString("UID          PID    PPID  C STIME TTY          TIME CMD\n")
+	} else {
+		out.WriteString("PID TTY          TIME CMD\n")
+	}
+	for _, process := range processes {
+		if wide {
+			fmt.Fprintf(&out, "%-10s %4d %4.1f %4.1f %-4s %s\n", process.User, process.PID, float64(process.CPUSeconds), float64(process.MemoryBytes)/1048576, process.State, process.Command)
+		} else if full {
+			fmt.Fprintf(&out, "%-10s %6d %7d  0 00:00 ?        00:00:00 %s\n", process.User, process.PID, process.PPID, process.Command)
+		} else {
+			fmt.Fprintf(&out, "%3d ?        00:00:%02d %s\n", process.PID, process.CPUSeconds, process.Command)
 		}
 	}
 	return Result{Stdout: out.String()}
+}
+
+func runPSTree(e *Env, _ []string, _ string) Result {
+	var out strings.Builder
+	processes := e.State.ProcessesSnapshot()
+	if len(processes) == 0 {
+		return Result{}
+	}
+	out.WriteString("systemd(1)")
+	for _, process := range processes[1:] {
+		name := path.Base(process.Command)
+		name = strings.TrimSuffix(name, ".service")
+		fmt.Fprintf(&out, "---%s(%d)", name, process.PID)
+	}
+	out.WriteByte('\n')
+	return Result{Stdout: out.String()}
+}
+
+func runPGrep(e *Env, args []string, _ string) Result {
+	all := false
+	pattern := ""
+	for _, arg := range args {
+		if arg == "-a" {
+			all = true
+			continue
+		}
+		if pattern == "" {
+			pattern = arg
+		} else {
+			return Result{ExitCode: 2, Stderr: "pgrep: too many patterns\n"}
+		}
+	}
+	if pattern == "" {
+		return Result{ExitCode: 2, Stderr: "pgrep: pattern is required\n"}
+	}
+	var out strings.Builder
+	found := 0
+	for _, process := range e.State.ProcessesSnapshot() {
+		if strings.Contains(process.Command, pattern) || (strings.TrimSuffix(path.Base(process.Command), ".service") == pattern) || (process.PID == 1 && pattern == "systemd") {
+			if all {
+				fmt.Fprintf(&out, "%d %s\n", process.PID, process.Command)
+			} else {
+				fmt.Fprintf(&out, "%d\n", process.PID)
+			}
+			found++
+		}
+	}
+	result := Result{Stdout: out.String()}
+	if found == 0 {
+		result.ExitCode = 1
+	}
+	return result
+}
+
+func runKill(e *Env, args []string, _ string) Result {
+	signal := "TERM"
+	operands := make([]string, 0, len(args))
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			signal = strings.TrimPrefix(arg, "-")
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	if len(operands) == 0 {
+		return Result{ExitCode: 2, Stderr: "kill: usage: kill [-SIGNAL] PID\n"}
+	}
+	mutations := make([]string, 0, len(operands))
+	for _, operand := range operands {
+		pid, err := strconv.Atoi(operand)
+		if err != nil {
+			return Result{ExitCode: 2, Stderr: "kill: invalid pid " + operand + "\n"}
+		}
+		if err := e.State.SignalProcess(pid, signal, e.User); err != nil {
+			return Result{ExitCode: 1, Stderr: "kill: " + err.Error() + "\n"}
+		}
+		mutations = append(mutations, operand)
+	}
+	return Result{Mutations: mutations}
+}
+
+func runPKill(e *Env, args []string, _ string) Result { return runKillAll(e, args, "") }
+
+func runKillAll(e *Env, args []string, _ string) Result {
+	if len(args) != 1 {
+		return Result{ExitCode: 2, Stderr: "killall: usage: killall NAME\n"}
+	}
+	pattern := args[0]
+	matched := 0
+	for _, process := range e.State.ProcessesSnapshot() {
+		name := strings.TrimSuffix(path.Base(process.Command), ".service")
+		if process.Command == pattern || name == pattern || strings.TrimSuffix(name, ".service") == strings.TrimSuffix(pattern, ".service") {
+			if err := e.State.SignalProcess(process.PID, "TERM", e.User); err != nil {
+				return Result{ExitCode: 1, Stderr: "killall: " + err.Error() + "\n"}
+			}
+			matched++
+		}
+	}
+	if matched == 0 {
+		return Result{ExitCode: 1, Stderr: "killall: " + pattern + ": no process found\n"}
+	}
+	return Result{Mutations: []string{pattern}}
+}
+
+func runTop(e *Env, _ []string, _ string) Result {
+	return Result{Stdout: "top - virtual RedLab process view\n" + runPS(e, []string{"aux"}, "").Stdout}
 }
 
 func runDF(e *Env, _ []string, _ string) Result {

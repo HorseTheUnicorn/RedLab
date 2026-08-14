@@ -1,6 +1,6 @@
 # Scenario authoring
 
-Run `redlab scenario init <directory>` for a working package template. Edit `scenario.yaml` and files under `files/`, then validate and test:
+Run `redlab scenario init <directory> --id <id> --title <title>` for a new working package template. This is a runtime authoring workflow: authors edit YAML and package files with the compiled binary and never need to recompile RedLab. Edit `scenario.yaml` and files under `files/`, then validate and test:
 
 ```text
 redlab scenario validate ./scenarios/broken-httpd
@@ -8,6 +8,8 @@ redlab scenario test ./scenarios/broken-httpd
 redlab scenario pack ./scenarios/broken-httpd
 redlab scenario inspect ./scenarios/broken-httpd.rlab
 ```
+
+The organizer dashboard provides the same no-recompile workflow under **Scenario Workshop**. It can create templates, import/export `.rlab` packages, validate and save `scenario.yaml`, and add or remove package files. Use the dashboard when the package should be attached to an event; use the CLI when working offline.
 
 Scenario YAML is strict. Unknown fields fail validation, and only registered `type` values are meaningful to the rule engine. A package is immutable once an event starts; teams receive virtual state derived from it.
 

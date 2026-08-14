@@ -28,6 +28,15 @@ func TestLevelABCommandsUseOnlyVirtualState(t *testing.T) {
 	if result := registry.Run("cp", env, []string{"/etc/app.conf", "/tmp/app.conf"}, ""); result.ExitCode != 0 {
 		t.Fatalf("cp failed: %+v", result)
 	}
+	if result := registry.Run("mkdir", env, []string{"/tmp/tree"}, ""); result.ExitCode != 0 {
+		t.Fatalf("mkdir failed: %+v", result)
+	}
+	if result := registry.Run("cp", env, []string{"-r", "/tmp/tree", "/tmp/tree-copy"}, ""); result.ExitCode != 0 {
+		t.Fatalf("recursive cp failed: %+v", result)
+	}
+	if result := registry.Run("mv", env, []string{"/tmp/tree-copy", "/tmp/tree-moved"}, ""); result.ExitCode != 0 {
+		t.Fatalf("directory mv failed: %+v", result)
+	}
 	if result := registry.Run("mv", env, []string{"/tmp/app.conf", "/tmp/moved.conf"}, ""); result.ExitCode != 0 {
 		t.Fatalf("mv failed: %+v", result)
 	}
@@ -42,6 +51,15 @@ func TestLevelABCommandsUseOnlyVirtualState(t *testing.T) {
 	}
 	if result := registry.Run("date", env, []string{"+%s"}, ""); result.Stdout != "1767323045\n" {
 		t.Fatalf("date output = %q", result.Stdout)
+	}
+	if result := registry.Run("ps", env, []string{"-ef"}, ""); result.ExitCode != 0 || !strings.Contains(result.Stdout, "/sbin/init") {
+		t.Fatalf("ps output = %+v", result)
+	}
+	if result := registry.Run("pgrep", env, []string{"systemd"}, ""); result.ExitCode != 0 || result.Stdout != "1\n" {
+		t.Fatalf("pgrep output = %+v", result)
+	}
+	if result := registry.Run("kill", env, []string{"1"}, ""); result.ExitCode == 0 {
+		t.Fatal("kill allowed terminating virtual PID 1")
 	}
 	if result := registry.Run("usermod", env, []string{"-aG", "ops", "trainee"}, ""); result.ExitCode != 0 || !state.UserInGroup("trainee", "ops") {
 		t.Fatalf("usermod result = %+v", result)

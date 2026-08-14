@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -29,32 +30,34 @@ import (
 )
 
 type Server struct {
-	Event         scenario.Event
-	EventFile     string
-	Packages      map[string]scenario.Package
-	Store         *store.Store
-	Sessions      map[string]*runtime.Session
-	Restarts      map[string]int
-	Activity      map[string]time.Time
-	Tokens        map[string]string
-	TokenExpiry   map[string]time.Time
-	RefreshTokens map[string]string
-	SigningKey    []byte
-	securityErr   error
-	Credentials   auth.File
-	credentialErr error
-	manualClose   bool
-	rateMu        sync.Mutex
-	rate          map[string]rateWindow
-	mu            sync.RWMutex
-	HTTP          *http.Server
-	upgrader      websocket.Upgrader
+	Event           scenario.Event
+	EventFile       string
+	Packages        map[string]scenario.Package
+	Store           *store.Store
+	Sessions        map[string]*runtime.Session
+	Restarts        map[string]int
+	Activity        map[string]time.Time
+	Tokens          map[string]string
+	TokenExpiry     map[string]time.Time
+	RefreshTokens   map[string]string
+	SigningKey      []byte
+	securityErr     error
+	Credentials     auth.File
+	credentialErr   error
+	manualClose     bool
+	ScenarioSources map[string]string
+	rateMu          sync.Mutex
+	rate            map[string]rateWindow
+	mu              sync.RWMutex
+	HTTP            *http.Server
+	upgrader        websocket.Upgrader
 }
 
 type loginRequest struct {
-	TeamID   string `json:"teamID"`
-	JoinCode string `json:"joinCode"`
-	Password string `json:"password"`
+	TeamID    string `json:"teamID"`
+	JoinCode  string `json:"joinCode"`
+	Password  string `json:"password"`
+	LinkToken string `json:"linkToken"`
 }
 type commandRequest struct {
 	Command string `json:"command"`
@@ -95,7 +98,15 @@ func New(eventFile string, event scenario.Event, packages map[string]scenario.Pa
 		signingKey = make([]byte, 32)
 		_, securityErr = rand.Read(signingKey)
 	}
-	s := &Server{Event: event, EventFile: eventFile, Packages: packages, Store: db, Sessions: map[string]*runtime.Session{}, Restarts: map[string]int{}, Activity: map[string]time.Time{}, Tokens: map[string]string{}, TokenExpiry: map[string]time.Time{}, RefreshTokens: map[string]string{}, SigningKey: signingKey, securityErr: securityErr, Credentials: credentials, credentialErr: credentialErr, rate: map[string]rateWindow{}, upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}}
+	sources := map[string]string{}
+	for _, reference := range event.Spec.Scenarios {
+		for id, pkg := range packages {
+			if samePath(pkg.Root, reference.Package, filepath.Dir(eventFile)) {
+				sources[id] = reference.Package
+			}
+		}
+	}
+	s := &Server{Event: event, EventFile: eventFile, Packages: packages, Store: db, Sessions: map[string]*runtime.Session{}, Restarts: map[string]int{}, Activity: map[string]time.Time{}, Tokens: map[string]string{}, TokenExpiry: map[string]time.Time{}, RefreshTokens: map[string]string{}, SigningKey: signingKey, securityErr: securityErr, Credentials: credentials, credentialErr: credentialErr, rate: map[string]rateWindow{}, ScenarioSources: sources, upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}}
 	s.HTTP = &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	return s
 }
@@ -105,6 +116,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/readyz", s.ready)
 	mux.HandleFunc("/api/v1/preflight", s.preflight)
 	mux.HandleFunc("/api/v1/auth/team/login", s.teamLogin)
+	mux.HandleFunc("/api/v1/auth/link", s.linkLogin)
 	mux.HandleFunc("/api/v1/auth/organizer/login", s.organizerLogin)
 	mux.HandleFunc("/api/v1/auth/refresh", s.refresh)
 	mux.HandleFunc("/api/v1/event", s.event)
@@ -252,22 +264,56 @@ func (s *Server) teamLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errors.New("teamID is required"))
 		return
 	}
-	if record, configured := s.Credentials.Teams[req.TeamID]; configured && !auth.Verify(record, req.JoinCode) {
-		writeError(w, http.StatusUnauthorized, errors.New("invalid team credentials"))
-		return
-	}
-	if len(s.Credentials.Teams) > 0 {
-		if _, configured := s.Credentials.Teams[req.TeamID]; !configured {
-			writeError(w, http.StatusUnauthorized, errors.New("unknown team"))
-			return
-		}
-	}
-	access, refresh, err := s.issueTokens(req.TeamID)
+	access, refresh, err := s.issueTeamTokens(req.TeamID, req.JoinCode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"accessToken": access, "refreshToken": refresh, "expiresIn": "1800", "teamID": req.TeamID})
+}
+
+func (s *Server) linkLogin(w http.ResponseWriter, r *http.Request) {
+	if s.credentialErr != nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("credential store is unavailable"))
+		return
+	}
+	var req loginRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil || req.TeamID == "" || req.JoinCode == "" || req.LinkToken == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("teamID, joinCode, and linkToken are required"))
+		return
+	}
+	s.mu.RLock()
+	link := s.Credentials.Link
+	s.mu.RUnlock()
+	if !auth.Verify(link, req.LinkToken) {
+		writeError(w, http.StatusUnauthorized, errors.New("invalid event link token"))
+		return
+	}
+	access, refresh, err := s.issueTeamTokens(req.TeamID, req.JoinCode)
+	if err != nil {
+		if strings.Contains(err.Error(), "credentials") || strings.Contains(err.Error(), "unknown team") {
+			writeError(w, http.StatusUnauthorized, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"accessToken": access, "refreshToken": refresh, "expiresIn": "1800", "teamID": req.TeamID})
+}
+
+func (s *Server) issueTeamTokens(teamID, joinCode string) (string, string, error) {
+	s.mu.RLock()
+	teams := s.Credentials.Teams
+	s.mu.RUnlock()
+	if record, configured := teams[teamID]; configured && !auth.Verify(record, joinCode) {
+		return "", "", errors.New("invalid team credentials")
+	}
+	if len(teams) > 0 {
+		if _, configured := teams[teamID]; !configured {
+			return "", "", errors.New("unknown team")
+		}
+	}
+	return s.issueTokens(teamID)
 }
 func (s *Server) organizerLogin(w http.ResponseWriter, r *http.Request) {
 	if s.credentialErr != nil {
@@ -371,6 +417,25 @@ func (s *Server) organizer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := splitPath(r.URL.Path)
+	if len(parts) >= 4 && parts[3] == "scenarios" {
+		s.organizerScenarios(w, r, parts[4:])
+		return
+	}
+	if len(parts) == 4 && parts[3] == "link-token" {
+		if r.Method == http.MethodGet {
+			s.mu.RLock()
+			configured := s.Credentials.Link.Hash != ""
+			s.mu.RUnlock()
+			writeJSON(w, http.StatusOK, map[string]bool{"configured": configured})
+			return
+		}
+		if r.Method == http.MethodPost {
+			s.rotateLinkToken(w)
+			return
+		}
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
 	if len(parts) >= 5 && ((parts[3] == "event" && (parts[4] == "close" || parts[4] == "reopen")) || (parts[3] == "submissions" && parts[4] == "close")) {
 		if r.Method != http.MethodPost || (parts[4] != "close" && parts[4] != "reopen") {
 			writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -444,6 +509,33 @@ func (s *Server) organizer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, errors.New("not found"))
+}
+
+func (s *Server) rotateLinkToken(w http.ResponseWriter) {
+	token, err := auth.GenerateToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	record, err := auth.NewRecord(token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	credentialsPath := filepath.Join(filepath.Dir(s.EventFile), "data", "credentials.json")
+	s.mu.Lock()
+	credentials := s.Credentials
+	credentials.Link = record
+	s.mu.Unlock()
+	if err := auth.Save(credentialsPath, credentials); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.mu.Lock()
+	s.Credentials = credentials
+	s.credentialErr = nil
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "rotatedAt": time.Now().UTC()})
 }
 
 func (s *Server) isOrganizer(r *http.Request) bool {
@@ -1030,7 +1122,11 @@ func (s *Server) limitMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusTooManyRequests, errors.New("request rate limit exceeded"))
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		limit := int64(2 << 20)
+		if r.URL.Path == "/api/v1/organizer/scenarios/import" {
+			limit = maxScenarioUpload + (1 << 20)
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1082,7 +1178,10 @@ func contextWithTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 10*time.Second)
 }
 
-const dashboardHTML = `<!doctype html>
+//go:embed dashboard.html
+var dashboardHTML string
+
+const legacyDashboardHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RedLab</title><style>
 body{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;background:#101820;color:#e8f0f2}main{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}.card{background:#182831;border:1px solid #2e4b56;border-radius:10px;padding:1rem}code{color:#9fe7c1}li{margin:.4rem 0}.muted{color:#a4bcc4}
